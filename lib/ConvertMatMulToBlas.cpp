@@ -138,19 +138,38 @@ struct MatmulOpToBlasLibraryCall : public ConversionPattern {
       ldC = rewriter.create<arith::IndexCastOp>(loc, i32Type, dimLdC);
     }
 
+    auto getLeadingDim = [&](Value memref) -> Value {
+      Value stride0 = rewriter.create<LLVM::ExtractValueOp>(
+          loc, memref, ArrayRef<int64_t>{4, 0});
+      return rewriter.create<LLVM::TruncOp>(loc, i32Type, stride0);
+    };
+
+    // For tiled subviews, the logical tile width can differ from the physical
+    // row stride. BLAS leading dimensions must use the descriptor stride.
+    ldA = getLeadingDim(lhs);
+    ldB = getLeadingDim(rhs);
+    ldC = getLeadingDim(output);
+
     // Alpha and Beta scalars
     Value alpha = rewriter.create<LLVM::ConstantOp>(
         loc, f32Type, rewriter.getF32FloatAttr(1.0));
     Value beta = rewriter.create<LLVM::ConstantOp>(
-        loc, f32Type, rewriter.getF32FloatAttr(0.0));
+        loc, f32Type, rewriter.getF32FloatAttr(1.0));
 
-    // Extract pointers from memrefs using LLVM operations
-    Value lhsPtr =
-        rewriter.create<LLVM::ExtractValueOp>(loc, lhs, ArrayRef<int64_t>{1});
-    Value rhsPtr =
-        rewriter.create<LLVM::ExtractValueOp>(loc, rhs, ArrayRef<int64_t>{1});
-    Value outputPtr = rewriter.create<LLVM::ExtractValueOp>(
-        loc, output, ArrayRef<int64_t>{1});
+    auto getOffsetPtr = [&](Value memref) -> Value {
+      Value alignedPtr = rewriter.create<LLVM::ExtractValueOp>(
+          loc, memref, ArrayRef<int64_t>{1});
+      Value offset = rewriter.create<LLVM::ExtractValueOp>(
+          loc, memref, ArrayRef<int64_t>{2});
+      return rewriter.create<LLVM::GEPOp>(loc, ptrType, f32Type, alignedPtr,
+                                          ValueRange{offset});
+    };
+
+    // Extract offset-adjusted pointers from memrefs. Tiled subviews carry
+    // non-zero descriptor offsets, and BLAS needs the tile start address.
+    Value lhsPtr = getOffsetPtr(lhs);
+    Value rhsPtr = getOffsetPtr(rhs);
+    Value outputPtr = getOffsetPtr(output);
 
     // Create the function call
     SmallVector<Value> args = {order, transA, transB,    M,   N,
