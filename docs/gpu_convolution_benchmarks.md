@@ -30,6 +30,7 @@ workspace limit is 256 MiB and can be changed with
 - Resolved image digest:
   `sha256:ad6d59a3bbf3e82c1c849c9ac09cfc2a3e0bbb8655042fd899be6681b3fe2a85`
 - cuDNN: `9.8.0.87-1` for CUDA 12
+- PyTorch: `2.13.0+cpu`; torchvision: `0.28.0+cpu`
 - torch-mlir: `c15565667004fe1f3726404afb3f3f862a945551`
 - LLVM: `068c6c5c0c8a0555036a2ff09a99f486548e6e8d`
 - L4 code generation: `sm_89`, PTX 8.0

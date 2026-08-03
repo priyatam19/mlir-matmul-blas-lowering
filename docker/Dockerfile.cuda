@@ -34,10 +34,14 @@ RUN git config --global url.https://github.com/.insteadOf git@github.com: && \
 RUN python3 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
+ARG TORCH_VERSION=2.13.0+cpu
+ARG TORCHVISION_VERSION=0.28.0+cpu
+
 WORKDIR /build/externals/torch-mlir
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt && \
-    pip install -r torchvision-requirements.txt && \
+    pip install --index-url https://download.pytorch.org/whl/cpu \
+      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" && \
+    pip install -r build-requirements.txt -r test-requirements.txt && \
     pip install pybind11
 
 WORKDIR /build
@@ -62,8 +66,11 @@ RUN cmake -GNinja -Bbuild \
 
 RUN ninja -C build -j"$(nproc)" \
     FileCheck MLIRPythonModules TorchMLIRPythonModules count llc \
-    mlir-headers mlir-opt mlir-runner mlir-translate mlir_cuda_runtime not \
+    mlir-headers mlir-opt mlir-runner mlir-translate mlir_cuda_runtime \
+    mlir_runner_utils not \
     torch-mlir-opt
+
+RUN ninja -C build -j"$(nproc)" mlir_c_runner_utils
 
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04@sha256:ad6d59a3bbf3e82c1c849c9ac09cfc2a3e0bbb8655042fd899be6681b3fe2a85 AS runtime-base
 
@@ -84,6 +91,8 @@ FROM runtime-base AS final
 
 ARG TORCH_MLIR_COMMIT=c15565667004fe1f3726404afb3f3f862a945551
 ARG LLVM_COMMIT=068c6c5c0c8a0555036a2ff09a99f486548e6e8d
+ARG TORCH_VERSION=2.13.0+cpu
+ARG TORCHVISION_VERSION=0.28.0+cpu
 
 COPY --from=torch-mlir-build /build /build
 COPY --from=torch-mlir-build /opt/venv /opt/venv
@@ -93,12 +102,16 @@ ENV PYTHONPATH=/build/build/tools/mlir/python_packages/mlir_core:/build/build/to
 ENV LD_LIBRARY_PATH=/build/build/lib:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:/usr/lib/x86_64-linux-gnu/openblas-pthread
 ENV TORCH_MLIR_COMMIT=${TORCH_MLIR_COMMIT}
 ENV LLVM_COMMIT=${LLVM_COMMIT}
+ENV TORCH_VERSION=${TORCH_VERSION}
+ENV TORCHVISION_VERSION=${TORCHVISION_VERSION}
 
 WORKDIR /workspace/project
 
 RUN mlir-opt --version && \
     torch-mlir-opt --version && \
     test -e /build/build/lib/libmlir_cuda_runtime.so && \
+    test -e /build/build/lib/libmlir_c_runner_utils.so && \
+    test -e /build/build/lib/libmlir_runner_utils.so && \
     llc --version >/dev/null && \
     python3 -c "import torch; print(torch.__version__)" && \
     python3 -c "import torch_mlir"

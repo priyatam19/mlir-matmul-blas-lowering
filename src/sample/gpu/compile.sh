@@ -81,7 +81,8 @@ g++ -std=c++17 -O3 -I"${CUDA_HOME}/include" -c "${SAMPLE_CALL}" \
   -o "${COMPILE_WORK_DIR}/sample_call.o"
 g++ -no-pie "${COMPILE_WORK_DIR}/sample_call.o" "${SAMPLE_OBJECT}" \
   "${extra_objects[@]}" -o "${OUTPUT_BINARY}" \
-  -L"${MLIR_BUILD_DIR}/lib" -lmlir_runner_utils -lmlir_cuda_runtime \
+  -L"${MLIR_BUILD_DIR}/lib" -lmlir_runner_utils -lmlir_c_runner_utils \
+  -lmlir_cuda_runtime \
   -L"${CUDA_STUB_LIB_DIR}" -L"${CUDA_LIB_DIR}" -lcuda -lcudart "${extra_libraries[@]}" \
   "${wrap_flags[@]}" \
   -Wl,-rpath,"${MLIR_BUILD_DIR}/lib" \
