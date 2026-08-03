@@ -1,5 +1,6 @@
 #include "lib/ConvertMatMulToBlas.h"
 #include "lib/TileMatMulForCache.h"
+#include "lib/TileMatMulForGpu.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -28,6 +29,10 @@ std::unique_ptr<mlir::Pass> createConvertMatmulToBlasLibraryCallPass() {
 
 std::unique_ptr<mlir::Pass> createTileMatMulForCachePass() {
   return std::make_unique<mlir::tutorial::TileMatMulForCachePass>();
+}
+
+std::unique_ptr<mlir::Pass> createTileMatMulForGpuPass() {
+  return std::make_unique<mlir::tutorial::TileMatMulForGpuPass>();
 }
 
 void linalgToBufferizationPipelineBuilder(mlir::OpPassManager &manager) {
@@ -83,6 +88,7 @@ int main(int argc, char **argv) {
 
   mlir::PassRegistration<mlir::tutorial::ConvertMatmulToBlasLibraryCallPass>();
   mlir::PassRegistration<mlir::tutorial::TileMatMulForCachePass>();
+  mlir::PassRegistration<mlir::tutorial::TileMatMulForGpuPass>();
 
   mlir::PassPipelineRegistration<>(
       "linalg-to-bufferization",

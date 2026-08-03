@@ -109,3 +109,25 @@ the overhead of issuing multiple smaller BLAS calls.
 - The most logical next pass is a matmul-to-cuBLAS lowering path, followed by a
   CUDA-specific tiled matmul lowering if the project wants to demonstrate a
   custom GPU kernel instead of a library call.
+
+## GPU Block/Thread Follow-Up
+
+The follow-up implementation adds a post-bufferization
+`--tile-matmul-for-gpu` pass. It maps output tiles to CUDA blocks, output
+elements to CUDA threads, and carries the K reduction in an SSA accumulator.
+For the `512x256x512` benchmark, offline lowering changes the launch topology
+from 1,024 expected runtime launches to one launch with grid `16x64x1` and
+threads `32x8x1`.
+
+The same-harness RunPod L4 comparison measured `55.069 ms` for legacy,
+`6.725 ms` for untiled generic lowering, and `0.134 ms` for block/thread
+lowering. The custom kernel is therefore `410.6x` faster than legacy and
+`50.1x` faster than untiled for this shape. Runtime diagnostics confirmed that
+legacy performs 1,024 launches while the custom path performs one.
+
+All five benchmark shapes passed full-output comparison against pedantic-FP32
+cuBLAS, including the irregular `513x257x509` case. The block/thread kernel
+reached roughly `1.0-1.2 TFLOP/s` on the regular GEMMs, while cuBLAS remained
+substantially faster. See
+[gpu_block_thread_benchmarks.md](gpu_block_thread_benchmarks.md) for the full
+table, tile sweep, and launch-validation procedure.

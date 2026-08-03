@@ -15,6 +15,7 @@ set (MLIR_TUTORIAL_TEST_DEPENDS
     FileCheck count not
     #TorchMLIRPythonModules
     mlir-opt
+    tutorial-opt
     torch-mlir-opt
     #mlir-runner
 )

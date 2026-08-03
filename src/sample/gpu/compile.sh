@@ -5,6 +5,7 @@ set -o pipefail
 MLIR_BUILD_DIR="${MLIR_BUILD_DIR:-/build/build}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 SAMPLE_CALL="${SAMPLE_CALL:-sample_call.cpp}"
+OUTPUT_BINARY="${OUTPUT_BINARY:-a.out}"
 
 if [[ ! -f sample.o ]]; then
   echo "sample.o is missing. Run: bash run_mlir_pipeline.sh" >&2
@@ -37,10 +38,19 @@ else
   CUDA_STUB_LIB_DIR="${CUDA_LIB_DIR}"
 fi
 
-g++ -I"${CUDA_HOME}/include" -c "${SAMPLE_CALL}" -o sample_call.o
-g++ -no-pie sample_call.o sample.o -o a.out \
+extra_libraries=()
+if [[ "${LINK_CUBLAS:-0}" == "1" ]]; then
+  extra_libraries+=("-lcublas")
+fi
+wrap_flags=()
+if [[ "${WRAP_MALLOC:-1}" == "1" ]]; then
+  wrap_flags+=("-Wl,--wrap=malloc" "-Wl,--wrap=free")
+fi
+
+g++ -std=c++17 -O3 -I"${CUDA_HOME}/include" -c "${SAMPLE_CALL}" -o sample_call.o
+g++ -no-pie sample_call.o sample.o -o "${OUTPUT_BINARY}" \
   -L"${MLIR_BUILD_DIR}/lib" -lmlir_runner_utils -lmlir_cuda_runtime \
-  -L"${CUDA_STUB_LIB_DIR}" -L"${CUDA_LIB_DIR}" -lcuda -lcudart \
-  -Wl,--wrap=malloc -Wl,--wrap=free \
+  -L"${CUDA_STUB_LIB_DIR}" -L"${CUDA_LIB_DIR}" -lcuda -lcudart "${extra_libraries[@]}" \
+  "${wrap_flags[@]}" \
   -Wl,-rpath,"${MLIR_BUILD_DIR}/lib" \
   -Wl,-rpath,"${CUDA_LIB_DIR}"
