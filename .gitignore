@@ -44,6 +44,9 @@ src/*/*/__pycache__/
 colab_bundle/
 runpod_results/
 
+# Local credential/connection notes
+docs/runpod.txt
+
 # MLIR text variants
 *mlir.txt
 
