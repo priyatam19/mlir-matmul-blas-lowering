@@ -62,6 +62,7 @@ tool_dirs = [config.project_tools_dir, config.llvm_tools_dir]
 tools = [
     "mlir-opt",
     "mlir-runner",
+    "tutorial-opt",
     "torch-mlir-opt",
 ]
 print("The path:", config.llvm_tools_dir)

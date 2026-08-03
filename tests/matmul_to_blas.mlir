@@ -7,3 +7,8 @@ func.func @foo(%lhs: tensor<?x?xf32>, %rhs: tensor<?x?xf32>, %acc: tensor<?x?xf3
   -> tensor<?x?xf32>
   return %result: tensor<?x?xf32>
 }
+
+// CHECK-LABEL: llvm.func @cblas_sgemm
+// CHECK-LABEL: func.func @foo
+// CHECK: llvm.call @cblas_sgemm
+// CHECK-NOT: linalg.matmul

@@ -1,5 +1,6 @@
 add_mlir_library(ConvertMatMulToBlas
     ConvertMatMulToBlas.cpp
+    TileMatMulForCache.cpp
 
     ADDITIONAL_HEADER_DIRS
     ${PROJECT_SOURCE_DIR}/lib/ConvertMatMulToBlas
@@ -8,5 +9,8 @@ add_mlir_library(ConvertMatMulToBlas
     MLIRIR
     MLIRFuncDialect
     MLIRLinalgDialect
+    MLIRLinalgTransforms
     MLIRPass
+    MLIRSCFDialect
+    MLIRTensorDialect
 )
