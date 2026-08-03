@@ -56,6 +56,22 @@ if [[ "${LINK_TUTORIAL_GPU_RUNTIME:-0}" == "1" ]]; then
   extra_objects+=("${COMPILE_WORK_DIR}/tutorial_gpu_runtime.o")
   extra_libraries+=("-lcublas")
 fi
+if [[ "${LINK_CUDNN:-0}" == "1" ]]; then
+  if [[ -e "${CUDA_HOME}/include/cudnn.h" ]]; then
+    CUDNN_INCLUDE_DIR="${CUDA_HOME}/include"
+  elif [[ -e "/usr/include/cudnn.h" ]]; then
+    CUDNN_INCLUDE_DIR="/usr/include"
+  else
+    echo "cuDNN headers not found under ${CUDA_HOME}/include or /usr/include." >&2
+    exit 1
+  fi
+  g++ -std=c++17 -O3 -I"${CUDA_HOME}/include" -I"${CUDNN_INCLUDE_DIR}" \
+    -I"${PROJECT_ROOT}/src/runtime" \
+    -c "${PROJECT_ROOT}/src/runtime/TutorialCudnnRuntime.cpp" \
+    -o "${COMPILE_WORK_DIR}/tutorial_cudnn_runtime.o"
+  extra_objects+=("${COMPILE_WORK_DIR}/tutorial_cudnn_runtime.o")
+  extra_libraries+=("-lcudnn")
+fi
 wrap_flags=()
 if [[ "${WRAP_MALLOC:-1}" == "1" ]]; then
   wrap_flags+=("-Wl,--wrap=malloc" "-Wl,--wrap=free")

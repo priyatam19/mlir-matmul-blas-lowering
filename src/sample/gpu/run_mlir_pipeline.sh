@@ -13,6 +13,7 @@ GPU_LOWERING="${GPU_LOWERING:-block-thread}"
 GPU_MAPPING_POLICY="${GPU_MAPPING_POLICY:-innermost-first}"
 BLOCK_M="${BLOCK_M:-8}"
 BLOCK_N="${BLOCK_N:-32}"
+CONV_THREADS="${CONV_THREADS:-256}"
 TILE_M="${TILE_M:-16}"
 TILE_N="${TILE_N:-16}"
 TILE_K="${TILE_K:-256}"
@@ -60,12 +61,14 @@ case "${GPU_LOWERING}" in
     | "${TUTORIAL_OPT}" \
         --tile-matmul-for-gpu="block-m=${BLOCK_M} block-n=${BLOCK_N}" \
         --tile-batch-matmul-for-gpu="block-m=${BLOCK_M} block-n=${BLOCK_N}" \
+        --tile-conv2d-nchw-for-gpu="threads=${CONV_THREADS}" \
         -o "${BUFFERIZED_MLIR}"
     ;;
   vendor)
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
         --convert-batch-matmul-to-cublas \
+        --convert-conv2d-nchw-to-cudnn \
         -o "${BUFFERIZED_MLIR}"
     ;;
   *)
