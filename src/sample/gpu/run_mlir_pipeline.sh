@@ -1,34 +1,89 @@
 #!/usr/bin/env bash
-set -e
-set -o pipefail
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+BUILD="${BUILD:-${PROJECT_ROOT}/build-ninja}"
+TUTORIAL_OPT="${BUILD}/tools/tutorial-opt"
 
 CUDA_CHIP="${CUDA_CHIP:-sm_75}"
 CUDA_PTX_FEATURE="${CUDA_PTX_FEATURE:-+ptx75}"
-MODEL_MLIR="${MODEL_MLIR:-sample_model_linalg.mlir}"
-TILE_M="${TILE_M:-2}"
-TILE_N="${TILE_N:-4}"
-TILE_K="${TILE_K:-4}"
-GPU_MAPPING_POLICY="${GPU_MAPPING_POLICY:-outermost-first}"
+MODEL_MLIR="${MODEL_MLIR:-${SCRIPT_DIR}/sample_model_linalg.mlir}"
+GPU_LOWERING="${GPU_LOWERING:-block-thread}"
+GPU_MAPPING_POLICY="${GPU_MAPPING_POLICY:-innermost-first}"
+BLOCK_M="${BLOCK_M:-8}"
+BLOCK_N="${BLOCK_N:-32}"
+TILE_M="${TILE_M:-16}"
+TILE_N="${TILE_N:-16}"
+TILE_K="${TILE_K:-256}"
 
-../../../build-ninja/tools/tutorial-opt \
-  --tile-matmul-for-cache="tile-m=${TILE_M} tile-n=${TILE_N} tile-k=${TILE_K}" \
-  "${MODEL_MLIR}" \
-| mlir-opt \
-  --convert-tensor-to-linalg \
-  --linalg-generalize-named-ops \
-  --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" \
-  --buffer-deallocation-pipeline \
-  --convert-bufferization-to-memref \
-  --llvm-request-c-wrappers \
+BUFFERIZED_MLIR="${SCRIPT_DIR}/sample_gpu_bufferized.mlir"
+GPU_DIALECT_MLIR="${SCRIPT_DIR}/sample_gpu_dialect.mlir"
+NVPTX_MLIR="${SCRIPT_DIR}/sample_nvptx_isa.mlir"
+
+bufferize_common=(
+  --convert-tensor-to-linalg
+  --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map"
+  --buffer-deallocation-pipeline
+  --convert-bufferization-to-memref
+  --llvm-request-c-wrappers
+)
+
+case "${GPU_LOWERING}" in
+  legacy)
+    "${TUTORIAL_OPT}" \
+      --tile-matmul-for-cache="tile-m=${TILE_M} tile-n=${TILE_N} tile-k=${TILE_K}" \
+      "${MODEL_MLIR}" \
+    | mlir-opt \
+        --convert-tensor-to-linalg \
+        --linalg-generalize-named-ops \
+        --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" \
+        --buffer-deallocation-pipeline \
+        --convert-bufferization-to-memref \
+        --llvm-request-c-wrappers \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
+  untiled)
+    mlir-opt "${MODEL_MLIR}" \
+      --convert-tensor-to-linalg \
+      --linalg-generalize-named-ops \
+      --one-shot-bufferize="bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map" \
+      --buffer-deallocation-pipeline \
+      --convert-bufferization-to-memref \
+      --llvm-request-c-wrappers \
+      -o "${BUFFERIZED_MLIR}"
+    ;;
+  block-thread)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --tile-matmul-for-gpu="block-m=${BLOCK_M} block-n=${BLOCK_N}" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
+  *)
+    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, or block-thread." >&2
+    exit 2
+    ;;
+esac
+
+mlir-opt "${BUFFERIZED_MLIR}" \
   --convert-linalg-to-parallel-loops \
   --gpu-map-parallel-loops="mapping-policy=${GPU_MAPPING_POLICY}" \
   --convert-parallel-loops-to-gpu \
   --canonicalize \
   --cse \
-| mlir-opt \
   --gpu-kernel-outlining \
   --lower-affine \
   --gpu-decompose-memrefs \
+  --canonicalize \
+  --cse \
+  -o "${GPU_DIALECT_MLIR}"
+
+if [[ "${GPU_DIALECT_ONLY:-0}" == "1" ]]; then
+  echo "Generated ${GPU_DIALECT_MLIR} with GPU_LOWERING=${GPU_LOWERING}."
+  exit 0
+fi
+
+mlir-opt "${GPU_DIALECT_MLIR}" \
   --expand-strided-metadata \
   --normalize-memrefs \
   --convert-index-to-llvm \
@@ -39,8 +94,9 @@ GPU_MAPPING_POLICY="${GPU_MAPPING_POLICY:-outermost-first}"
   --reconcile-unrealized-casts \
   --gpu-to-llvm='use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true' \
   --gpu-module-to-binary \
-  -o sample_nvptx_isa.mlir
+  -o "${NVPTX_MLIR}"
 
-mlir-translate -mlir-to-llvmir sample_nvptx_isa.mlir -o sample.ll
+mlir-translate -mlir-to-llvmir "${NVPTX_MLIR}" -o "${SCRIPT_DIR}/sample.ll"
+llc -filetype=obj -O3 "${SCRIPT_DIR}/sample.ll" -o "${SCRIPT_DIR}/sample.o"
 
-llc -filetype=obj -O3 sample.ll
+echo "Generated ${SCRIPT_DIR}/sample.o with GPU_LOWERING=${GPU_LOWERING}."
