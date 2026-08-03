@@ -1,5 +1,7 @@
 add_mlir_library(ConvertMatMulToBlas
+    ConvertBatchMatMulToCublas.cpp
     ConvertMatMulToBlas.cpp
+    TileBatchMatMulForGpu.cpp
     TileMatMulForCache.cpp
     TileMatMulForGpu.cpp
 
