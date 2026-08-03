@@ -3,6 +3,26 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+
+#include <cuda_runtime.h>
+
+extern "C" {
+void *__real_malloc(size_t size);
+void __real_free(void *ptr);
+
+void *__wrap_malloc(size_t size) {
+  void *ptr = nullptr;
+  if (cudaMallocManaged(&ptr, size, cudaMemAttachGlobal) != cudaSuccess)
+    return __real_malloc(size);
+  return ptr;
+}
+
+void __wrap_free(void *ptr) {
+  if (ptr)
+    cudaFree(ptr);
+}
+}
 
 template <typename T, int N> struct MemRefDescriptor {
   T *allocated;
@@ -18,12 +38,15 @@ void _mlir_ciface_sample_model(MemRefDescriptor<float, 2> *output,
 }
 
 int main(int argc, char *argv[]) {
-  float inputData[3][4];
-  float outputData[3][5];
+  float *inputData = nullptr;
+  float *outputData = nullptr;
+
+  cudaMallocManaged(&inputData, 3 * 4 * sizeof(float), cudaMemAttachGlobal);
+  cudaMallocManaged(&outputData, 3 * 5 * sizeof(float), cudaMemAttachGlobal);
 
   for (int i = 0; i < 3; i++) {
     for (int j = 0; j < 4; j++) {
-      inputData[i][j] = 1.0;
+      inputData[i * 4 + j] = 1.0;
     }
   }
 
@@ -36,21 +59,22 @@ int main(int argc, char *argv[]) {
   int64_t output_strides[2] = {5, 1}; // row-major layout
 
   MemRefDescriptor<float, 2> inputMemRef = {
-      (float *)inputData,
-      (float *)inputData,
+      inputData,
+      inputData,
       offset,
       {input_sizes[0], input_sizes[1]},
       {input_strides[0], input_strides[1]}};
 
   MemRefDescriptor<float, 2> outputMemRef = {
-      (float *)outputData,
-      (float *)outputData,
+      outputData,
+      outputData,
       offset,
       {output_size[0], output_size[1]},
       {output_strides[0], output_strides[1]}};
 
   // Call the model
   _mlir_ciface_sample_model(&outputMemRef, &inputMemRef);
+  cudaDeviceSynchronize();
 
   float *output = (float *)outputMemRef.aligned;
 
@@ -60,6 +84,9 @@ int main(int argc, char *argv[]) {
                 << output[i * output_strides[0] + j] << ' ';
     std::cout << "\n";
   }
+
+  cudaFree(inputData);
+  cudaFree(outputData);
 
   return 0;
 }
