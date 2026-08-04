@@ -70,6 +70,24 @@ motivates fusion work after the next shared-memory operator optimization.
 - The default `8x32` BMM and 256-thread convolution configurations remain
   reasonable cross-shape choices.
 
+## Nsight Systems Analysis
+
+Nsight Systems 2024.6.2 collected ten post-timing traces without requiring GPU
+hardware-counter access. The isolated traces confirm one implementation launch
+per operator. Long BMM kernel time falls from 21.935 ms with one-thread blocks
+to 0.310 ms with `32x8x1` blocks (70.73x), while ResNet convolution falls from
+10.216 ms to 0.264 ms with 256-thread blocks (38.71x).
+
+The mixed traces locate the remaining whole-model bottleneck. The two mapped
+BMM kernels account for only 2.88% of attention GPU kernel time, and the two
+mapped convolution kernels account for only 1.21% of residual-block GPU kernel
+time. Most GPU time remains in generic elementwise, transpose, reduction, and
+normalization kernels using one-thread blocks. Stream synchronization time
+closely matches total GPU kernel time, so these kernels execute serially with
+little opportunity for CPU/GPU overlap. Full tables and machine-readable
+reports are in `runpod_results/l4_eval_2026-08-04/nsys_summary.md` and its
+adjacent `nsys/` directory.
+
 ## Correctness and Diagnostics
 
 - All full-output comparisons passed.
@@ -78,8 +96,8 @@ motivates fusion work after the next shared-memory operator optimization.
   cuBLAS or cuDNN call.
 - Attention uses 14 generic/custom launches or 12 launches plus two cuBLAS
   calls. Residual convolution uses 9 launches or 7 plus two cuDNN calls.
-- Nsight Compute could not access hardware counters (`ERR_NVGPUCTRPERM`), so
-  profiling was recorded as non-blocking and skipped.
+- Nsight Systems timeline, CUDA API, library, GPU memory, and OS runtime tracing
+  completed for all ten representative configurations.
 
 The run exposed and fixed three evaluation issues: sanitizer summaries may be
 printed to stdout, `CUDA_HOME` must be exported so MLIR links `libdevice`, and
@@ -88,4 +106,4 @@ GPU telemetry CSVs must be excluded from benchmark parsing.
 Compact machine-readable results are under
 `runpod_results/l4_eval_2026-08-04`. The complete local archive is
 `l4_eval_20260804T151913Z.tar.gz`, with SHA-256
-`4e14dbf68df8e750c8f57422b293e2d1bc31f819eeb8abcaf448ddb126422107`.
+`56ac9fee61cc753b9087af2695e869e9d686585567411f835111f824d57e75b6`.

@@ -1,0 +1,4 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),GridXYZ,BlockXYZ,Name
+99.8,10216179,1,10216179.0,10216179.0,10216179,10216179,0.0,  56   64    1,   1    1    1,gpu_conv_resnet_block_kernel
+0.1,13888,1,13888.0,13888.0,13888,13888,0.0,   2    7    4, 256    1    1,_5x_cudnn_ampere_scudnn_winograd_128x128_ldg1_ldg4_relu_tile148n_nt_v1
+0.0,1952,1,1952.0,1952.0,1952,1952,0.0,   2   16    1,  32    4    1,"void cudnn::winograd::generateWinogradTilesKernel<(int)0, float, float>(cudnn::winograd::GenerateWinogradTilesParams<T2, T3>)"

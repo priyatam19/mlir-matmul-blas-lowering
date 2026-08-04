@@ -1,0 +1,5 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),GridXYZ,BlockXYZ,Name
+49.8,1009174,2,504587.0,504587.0,272830,736344,327753.9,  34   16    1,   1    1    1,residual_conv_block_kernel
+49.4,1001365,5,200273.0,3392.0,3104,564666,274139.6,  32   16    1,   1    1    1,residual_conv_block_kernel
+0.6,12448,2,6224.0,6224.0,6176,6272,67.9,   1    4    2, 256    1    1,_5x_cudnn_ampere_scudnn_winograd_128x128_ldg1_ldg4_relu_tile148n_nt_v1
+0.2,3904,2,1952.0,1952.0,1632,2272,452.5,   1    4    1,  32    4    1,"void cudnn::winograd::generateWinogradTilesKernel<(int)0, float, float>(cudnn::winograd::GenerateWinogradTilesParams<T2, T3>)"

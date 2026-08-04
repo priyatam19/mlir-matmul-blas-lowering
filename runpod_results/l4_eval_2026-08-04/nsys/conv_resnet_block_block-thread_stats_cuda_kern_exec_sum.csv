@@ -1,0 +1,4 @@
+PID,TID,DevId,Count,QCount,TAvg (ns),TMed (ns),TMin (ns),TMax (ns),TStdDev (ns),AAvg (ns),AMed (ns),AMin (ns),AMax (ns),AStdDev (ns),QAvg (ns),QMed (ns),QMin (ns),QMax (ns),QStdDev (ns),KAvg (ns),KMed (ns),KMin (ns),KMax (ns),KStdDev (ns),API Name,Kernel Name
+9035,9035,0,1,0,44800952.0,44800952.0,44800952,44800952,0.0,44795233.0,44795233.0,44795233,44795233,0.0,,,,,0.0,13984.0,13984.0,13984,13984,0.0,cudaLaunchKernel,_5x_cudnn_ampere_scudnn_winograd_128x128_ldg1_ldg4_relu_tile148n_nt_v1
+9035,9035,0,1,0,277120.0,277120.0,277120,277120,0.0,15080.0,15080.0,15080,15080,0.0,,,,,0.0,263933.0,263933.0,263933,263933,0.0,cuLaunchKernel,gpu_conv_resnet_block_kernel
+9035,9035,0,1,1,211534.0,211534.0,211534,211534,0.0,209508.0,209508.0,209508,209508,0.0,42.0,42.0,42,42,0.0,1984.0,1984.0,1984,1984,0.0,cudaLaunchKernel,"void cudnn::winograd::generateWinogradTilesKernel<(int)0, float, float>(cudnn::winograd::GenerateWinogradTilesParams<T2, T3>)"
