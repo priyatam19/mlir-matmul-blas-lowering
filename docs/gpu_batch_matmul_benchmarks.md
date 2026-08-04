@@ -36,9 +36,11 @@ p10/p50/p90, GFLOP/s, and maximum absolute/relative error.
 
 The PyTorch-derived `AttentionBlock` adds a transpose, scaling, stable softmax,
 and a second batch matmul. Torch-MLIR produces two `linalg.batch_matmul`
-operations and six generic elementwise/reduction operations. The complete
-program compiles in all three modes, proving unmatched operations retain the
-generic path.
+operations and six generic elementwise/reduction operations. The runner uses
+the same deterministic inputs in C++ and PyTorch and compares the complete
+compiled output against a PyTorch-generated reference. The complete program
+compiles in all three modes, proving unmatched operations retain the generic
+path.
 
 ## L4 Procedure
 
@@ -54,17 +56,21 @@ for mode in untiled block-thread vendor; do
 done
 
 for mode in untiled block-thread vendor; do
-  GPU_LOWERING="${mode}" \
+  GPU_LOWERING="${mode}" CHECK_LAUNCHES=1 \
     bash src/benchmarks/run_gpu_attention_benchmark.sh
 done
 
-ATTENTION_MLIR_OUT=src/benchmarks/gpu_attention_block.mlir \
-  python3 src/benchmarks/pytorch_attention_bench.py
+/opt/pytorch-cuda/bin/python \
+  src/benchmarks/pytorch_attention_bench.py
 ```
 
 `CHECK_LAUNCHES=1` expects one MLIR CUDA launch for `untiled` and
 `block-thread`, or one runtime cuBLAS call for `vendor`. Diagnostics run outside
-the timed samples. Do not use `CUDA_LAUNCH_BLOCKING=1` while timing.
+the timed samples. For the mixed program it expects 14 launches for `untiled`
+and `block-thread`, or 12 generic launches and two cuBLAS calls for `vendor`.
+The compiler environment generates the PyTorch reference; the separate
+`/opt/pytorch-cuda` environment is used only for eager-CUDA timing. Do not use
+`CUDA_LAUNCH_BLOCKING=1` while timing.
 
 ## Offline Verification
 

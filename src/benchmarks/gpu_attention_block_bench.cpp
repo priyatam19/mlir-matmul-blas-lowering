@@ -106,6 +106,25 @@ std::vector<float> referenceAttention(const float *query, const float *key,
   return output;
 }
 
+std::vector<float> loadPyTorchReference(const char *path, size_t elements) {
+  std::vector<float> output(elements);
+  std::FILE *file = std::fopen(path, "rb");
+  if (!file) {
+    std::perror(path);
+    std::exit(1);
+  }
+  size_t readElements =
+      std::fread(output.data(), sizeof(float), output.size(), file);
+  int trailingByte = std::fgetc(file);
+  std::fclose(file);
+  if (readElements != output.size() || trailingByte != EOF) {
+    std::fprintf(stderr, "PyTorch reference has an unexpected size: %s\n",
+                 path);
+    std::exit(1);
+  }
+  return output;
+}
+
 } // namespace
 
 int main() {
@@ -159,6 +178,8 @@ int main() {
   checkCuda(cudaDeviceSynchronize(), "correctness synchronize");
   std::vector<float> reference =
       referenceAttention(queryData, keyData, valueData);
+  if (const char *referencePath = std::getenv("PYTORCH_REFERENCE"))
+    reference = loadPyTorchReference(referencePath, elements);
   double maxAbsError = 0.0;
   double maxRelError = 0.0;
   size_t mismatches = 0;

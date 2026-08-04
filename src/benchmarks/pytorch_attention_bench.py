@@ -6,8 +6,6 @@ import statistics
 import time
 
 import torch
-from torch_mlir import fx
-from torch_mlir.compiler_utils import OutputType
 
 
 class AttentionBlock(torch.nn.Module):
@@ -23,15 +21,19 @@ def percentile(values, fraction):
 
 
 def main():
-    torch.manual_seed(41)
     export_module = AttentionBlock().eval()
+    elements = 12 * 128 * 64
+    indices = torch.arange(elements)
     cpu_inputs = (
-        torch.randn(12, 128, 64),
-        torch.randn(12, 128, 64),
-        torch.randn(12, 128, 64),
+        ((indices % 101) + 1).float().mul(0.001).reshape(12, 128, 64),
+        (((indices + 11) % 103) + 1).float().mul(0.001).reshape(12, 128, 64),
+        (((indices + 17) % 107) + 1).float().mul(0.001).reshape(12, 128, 64),
     )
     output_path = os.getenv("ATTENTION_MLIR_OUT")
     if output_path:
+        from torch_mlir import fx
+        from torch_mlir.compiler_utils import OutputType
+
         mlir_module = fx.export_and_import(
             export_module,
             *cpu_inputs,
@@ -43,6 +45,13 @@ def main():
         if os.getenv("EXPORT_ONLY") == "1":
             return
 
+    reference_path = os.getenv("ATTENTION_REFERENCE_OUT")
+    if reference_path:
+        with torch.no_grad():
+            export_module(*cpu_inputs).contiguous().numpy().tofile(reference_path)
+        if os.getenv("REFERENCE_ONLY") == "1":
+            return
+
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
 
@@ -50,11 +59,8 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
     warmups = int(os.getenv("WARMUPS", "10"))
     runs = int(os.getenv("RUNS", "50"))
-    batch, sequence, head_dim = 12, 128, 64
     module = AttentionBlock().eval().cuda()
-    query = torch.randn(batch, sequence, head_dim, device="cuda")
-    key = torch.randn(batch, sequence, head_dim, device="cuda")
-    value = torch.randn(batch, sequence, head_dim, device="cuda")
+    query, key, value = (tensor.cuda() for tensor in cpu_inputs)
 
     for _ in range(warmups):
         module(query, key, value)

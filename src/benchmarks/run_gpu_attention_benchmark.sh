@@ -37,5 +37,30 @@ if [[ "${BUILD_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+PYTORCH_REFERENCE="${ARTIFACT_DIR}/pytorch_reference.bin"
+ATTENTION_REFERENCE_OUT="${PYTORCH_REFERENCE}" REFERENCE_ONLY=1 \
+  python3 "${PROJ}/src/benchmarks/pytorch_attention_bench.py"
+export PYTORCH_REFERENCE
+
+if [[ "${CHECK_LAUNCHES:-0}" == "1" ]]; then
+  diagnostic_log="$(mktemp)"
+  if [[ "${GPU_LOWERING}" == "vendor" ]]; then
+    MLIR_CUDA_DEBUG=1 TUTORIAL_GPU_RUNTIME_DEBUG=1 LAUNCH_CHECK_ONLY=1 \
+      GPU_LOWERING="${GPU_LOWERING}" "${BINARY}" 2>"${diagnostic_log}"
+    launch_count="$(grep -c 'Launching kernel' "${diagnostic_log}" || true)"
+    call_count="$(grep -c 'op=cublas_batch_matmul' "${diagnostic_log}" || true)"
+    echo "launch_count=${launch_count} expected=12 attention_block" >&2
+    echo "vendor_call_count=${call_count} expected=2 attention_block" >&2
+    [[ "${launch_count}" == "12" && "${call_count}" == "2" ]]
+  else
+    MLIR_CUDA_DEBUG=1 LAUNCH_CHECK_ONLY=1 GPU_LOWERING="${GPU_LOWERING}" \
+      "${BINARY}" 2>"${diagnostic_log}"
+    launch_count="$(grep -c 'Launching kernel' "${diagnostic_log}" || true)"
+    echo "launch_count=${launch_count} expected=14 attention_block" >&2
+    [[ "${launch_count}" == "14" ]]
+  fi
+  rm -f "${diagnostic_log}"
+fi
+
 GPU_LOWERING="${GPU_LOWERING}" WARMUPS="${WARMUPS:-5}" RUNS="${RUNS:-20}" \
   "${BINARY}"
