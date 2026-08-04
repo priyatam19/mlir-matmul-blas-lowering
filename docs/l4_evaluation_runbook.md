@@ -12,10 +12,19 @@ The evaluation image contains two isolated Python environments:
 - `/opt/venv`: PyTorch 2.13 CPU and the pinned torch-mlir compiler.
 - `/opt/pytorch-cuda`: PyTorch 2.8.0 with CUDA 12.8 for eager baselines.
 
-Publish the image before renting the pod and use its immutable commit tag and
-digest. The RunPod container should have at least 50 GB of container disk and a
-persistent `/workspace` volume of at least 20 GB. Use one 24 GB L4 and expose a
-direct TCP SSH endpoint so the final archive can be copied with SCP.
+The prepared public image is:
+
+```text
+priyatam19/mlir-matmul-blas-lowering:l4-eval-8da8a9b
+priyatam19/mlir-matmul-blas-lowering@sha256:31b7d9addffac9e37a81c4dbb9a9e5efe533ee0e14d328400a1f5b02cd9ba1c5
+```
+
+It was built from commit `8da8a9bed553e336d5bb6500fe5b4d222abebc4c`.
+Use the digest form as the RunPod container image. The pod should have at least
+50 GB of container disk and a persistent `/workspace` volume of at least 20 GB.
+Use one 24 GB L4 and expose a direct TCP SSH endpoint so the final archive can
+be copied with SCP. The public image can be pulled without registry
+credentials.
 
 ## Start and Resume
 
@@ -26,10 +35,10 @@ and run the evaluation under `tmux`:
 cd /workspace
 git clone https://github.com/priyatam19/mlir-matmul-blas-lowering.git mlir_project
 cd mlir_project
-git checkout <pr4-evaluation-commit>
+git checkout 8da8a9bed553e336d5bb6500fe5b4d222abebc4c
 
 export RESULTS_DIR=/workspace/results/l4_eval_$(date -u +%Y%m%dT%H%M%SZ)
-export EVALUATION_IMAGE_REF=ghcr.io/priyatam19/mlir-matmul-blas-lowering:l4-eval-<commit>
+export EVALUATION_IMAGE_REF=priyatam19/mlir-matmul-blas-lowering@sha256:31b7d9addffac9e37a81c4dbb9a9e5efe533ee0e14d328400a1f5b02cd9ba1c5
 tmux new -s l4-eval
 EVAL_PHASE=all bash src/benchmarks/run_l4_evaluation.sh \
   2>&1 | tee "${RESULTS_DIR}/evaluation.log"
