@@ -1,0 +1,26 @@
+timestamp_utc=2026-08-04T15:24:53Z
+git_sha=8da8a9bed553e336d5bb6500fe5b4d222abebc4c
+git_branch=
+evaluation_image=salvaged-from-sha256-31b7d9addffac9e37a81c4dbb9a9e5efe533ee0e14d328400a1f5b02cd9ba1c5
+cuda_visible_devices=0
+gpu_name=NVIDIA L4
+gpu_memory_mib=23034
+cpu_count=128
+memory_kib=792409324
+compiler_python=2.13.0.dev20260518+cpu
+cuda_python=2.8.0+cu128
+cuda_python_cuda=12.8
+cuda_available=True
+cudnn=91002
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Fri_Feb_21_20:23:50_PST_2025
+Cuda compilation tools, release 12.8, V12.8.93
+Build cuda_12.8.r12.8/compiler.35583870_0
+name, uuid, driver_version, pstate, temperature.gpu, power.draw [W], clocks.current.sm [MHz], clocks.current.memory [MHz], memory.total [MiB], memory.used [MiB]
+NVIDIA L4, GPU-279db6e9-e644-ae47-d0fc-67ee550f23b5, 570.195.03, P8, 24, 16.61 W, 210 MHz, 405 MHz, 23034 MiB, 0 MiB
+Filesystem                   Size  Used Avail Use% Mounted on
+mfs#us-mo-2.runpod.net:9421  196T  135T   61T  69% /workspace
+runtime_runner_commit=2f9173b336992c61290af7b50c877db3468f55b7
+runtime_runner_commit=e8bbd0300f7672ff83d2e2775118880e71bf0b3a
+runtime_summary_commit=bc36a99f5671ecb2f974a4dedba4b2eb1cb24cd5

@@ -100,7 +100,8 @@ samples.
 - The C++ harnesses and cuDNN runtime compile with warnings as errors.
 - `check-mlir-tutorial` passes 14/14 tests.
 
-Runtime measurements and `compute-sanitizer` remain pending until an L4 is
-available. The custom ResNet 3x3 kernel must beat generic lowering by at least
-10x. Every vendor-lowered operator must remain within 5x of direct cuDNN p50,
-and all outputs must pass full-element validation.
+The 2026-08-04 L4 run passed full-output validation and Compute Sanitizer. The
+ResNet 3x3 convolution improved from 10.764224 ms untiled to 0.278656 ms
+block-thread, a 38.63x speedup. Its vendor path measured 0.052544 ms versus
+0.052128 ms for direct cuDNN. See [the unified L4 results](l4_evaluation_results.md)
+for every shape, mixed-residual measurements, tuning, and artifacts.

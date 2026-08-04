@@ -106,3 +106,6 @@ sha256sum <run>.tar.gz
 The archive contains the environment manifest, phase markers, build logs,
 diagnostics, sanitizer output, raw CSV files, tuning results, profiler output,
 `summary.csv`, `gates.json`, `evaluation_summary.md`, and per-file checksums.
+
+The completed 2026-08-04 run is summarized in
+[NVIDIA L4 Evaluation Results](l4_evaluation_results.md).

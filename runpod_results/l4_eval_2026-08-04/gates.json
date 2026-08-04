@@ -1,0 +1,92 @@
+{
+  "overall_status": "pass",
+  "gates": [
+    {
+      "name": "bmm_long custom speedup",
+      "status": "pass",
+      "actual": 68.71978528211105,
+      "threshold": 10.0,
+      "relation": ">="
+    },
+    {
+      "name": "conv_resnet_block custom speedup",
+      "status": "pass",
+      "actual": 38.629076065921936,
+      "threshold": 10.0,
+      "relation": ">="
+    },
+    {
+      "name": "bmm_bert vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0361905378684844,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "bmm_long vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0658093529779997,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "bmm_value vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0385355852601155,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "bmm_irregular vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.037769840377698,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "conv_small vendor/direct ratio",
+      "status": "pass",
+      "actual": 0.9876288981958762,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "conv_resnet_stem vendor/direct ratio",
+      "status": "pass",
+      "actual": 0.9597815752200467,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "conv_resnet_block vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0079804139034843,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "conv_pointwise vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0152608041001387,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "conv_irregular vendor/direct ratio",
+      "status": "pass",
+      "actual": 1.0332681333558016,
+      "threshold": 5.0,
+      "relation": "<="
+    },
+    {
+      "name": "PR2 GEMM p50 regression",
+      "status": "pass",
+      "actual": 0.135647997,
+      "threshold": [
+        0.1206,
+        0.1474
+      ],
+      "relation": "within"
+    }
+  ]
+}

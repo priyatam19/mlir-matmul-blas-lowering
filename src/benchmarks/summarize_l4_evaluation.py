@@ -177,7 +177,7 @@ def write_summary_csv(path, summaries):
         "trial_p50_ratio",
     )
     with Path(path).open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(summaries)
 
