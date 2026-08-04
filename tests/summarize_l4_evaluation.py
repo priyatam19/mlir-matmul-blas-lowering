@@ -41,6 +41,10 @@ summary = load_module(Path(sys.argv[1]))
 with tempfile.TemporaryDirectory() as temporary:
     raw = Path(temporary) / "raw"
     raw.mkdir()
+    (raw / "gpu_before_trial_1.csv").write_text(
+        "timestamp,name,pstate\n2026-08-04T00:00:00Z,NVIDIA L4,P8\n",
+        encoding="utf-8",
+    )
     for trial in range(1, 4):
         write_rows(
             raw / f"timing__bmm__all__untiled__trial_{trial}.csv",

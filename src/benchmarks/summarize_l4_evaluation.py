@@ -37,7 +37,11 @@ def load_records(directory):
     records = []
     if not directory.exists():
         return records
-    for path in sorted(directory.glob("*.csv")):
+    result_paths = (
+        path for path in directory.glob("*.csv")
+        if path.name.startswith(("timing__", "sweep__"))
+    )
+    for path in sorted(result_paths):
         metadata = _metadata(path)
         header = None
         with path.open(newline="", encoding="utf-8") as stream:
