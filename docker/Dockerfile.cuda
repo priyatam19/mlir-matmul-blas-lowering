@@ -93,9 +93,20 @@ ARG TORCH_MLIR_COMMIT=c15565667004fe1f3726404afb3f3f862a945551
 ARG LLVM_COMMIT=068c6c5c0c8a0555036a2ff09a99f486548e6e8d
 ARG TORCH_VERSION=2.13.0+cpu
 ARG TORCHVISION_VERSION=0.28.0+cpu
+ARG PYTORCH_CUDA_VERSION=2.8.0+cu128
 
 COPY --from=torch-mlir-build /build /build
 COPY --from=torch-mlir-build /opt/venv /opt/venv
+
+RUN /usr/bin/python3 -m venv /opt/pytorch-cuda && \
+    /opt/pytorch-cuda/bin/pip install --upgrade pip && \
+    /opt/pytorch-cuda/bin/pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      "torch==${PYTORCH_CUDA_VERSION}"
+
+ARG PYTORCH_CUDA_NUMPY_VERSION=2.1.2
+RUN /opt/pytorch-cuda/bin/pip install --no-cache-dir \
+      "numpy==${PYTORCH_CUDA_NUMPY_VERSION}"
 
 ENV PATH=/opt/venv/bin:/build/build/bin:$PATH
 ENV PYTHONPATH=/build/build/tools/mlir/python_packages/mlir_core:/build/build/tools/torch-mlir/python_packages/torch_mlir
@@ -104,6 +115,9 @@ ENV TORCH_MLIR_COMMIT=${TORCH_MLIR_COMMIT}
 ENV LLVM_COMMIT=${LLVM_COMMIT}
 ENV TORCH_VERSION=${TORCH_VERSION}
 ENV TORCHVISION_VERSION=${TORCHVISION_VERSION}
+ENV PYTORCH_CUDA_VERSION=${PYTORCH_CUDA_VERSION}
+ENV PYTORCH_CUDA_NUMPY_VERSION=${PYTORCH_CUDA_NUMPY_VERSION}
+ENV PYTORCH_CUDA_PYTHON=/opt/pytorch-cuda/bin/python
 
 WORKDIR /workspace/project
 
@@ -114,6 +128,8 @@ RUN mlir-opt --version && \
     test -e /build/build/lib/libmlir_runner_utils.so && \
     llc --version >/dev/null && \
     python3 -c "import torch; print(torch.__version__)" && \
-    python3 -c "import torch_mlir"
+    python3 -c "import torch_mlir" && \
+    /opt/pytorch-cuda/bin/python -c \
+      "import numpy, torch; print(torch.__version__, torch.version.cuda, numpy.__version__)"
 
 CMD ["/bin/bash"]
