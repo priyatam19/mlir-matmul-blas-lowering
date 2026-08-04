@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,8 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src/benchmarks/plot_project_performance.py"
+README = ROOT / "README.md"
+REPORT = ROOT / "docs/performance_visuals.md"
 FIGURE_NAMES = (
     "01_optimization_milestones",
     "02_gemm_scaling",
@@ -57,6 +60,18 @@ class ProjectPerformancePlotTest(unittest.TestCase):
             self.run_plotter("--output-dir", str(output_dir))
             second_hashes = {path.name: digest(path) for path in output_dir.iterdir()}
             self.assertEqual(first_hashes, second_hashes)
+
+    def test_markdown_figure_links_resolve(self) -> None:
+        references = (
+            (README, ROOT, 3),
+            (REPORT, REPORT.parent, 7),
+        )
+        for markdown_path, base, expected_count in references:
+            text = markdown_path.read_text(encoding="utf-8")
+            links = re.findall(r"!\[[^]]*\]\(([^)]+performance/[^)]+)\)", text)
+            self.assertEqual(len(links), expected_count)
+            for link in links:
+                self.assertTrue((base / link).is_file(), f"Broken image link in {markdown_path}: {link}")
 
 
 if __name__ == "__main__":

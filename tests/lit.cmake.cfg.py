@@ -49,7 +49,16 @@ llvm_config.use_default_substitutions()
 # excludes: A list of directories to exclude from the testsuite. The 'Inputs'
 # subdirectories contain auxiliary inputs for various tests in their parent
 # directories.
-config.excludes = ["Inputs", "Examples", "CMakeLists.txt", "README.txt", "LICENSE.txt", "lit.cmake.cfg.py", "get_fx_graph.py"]
+config.excludes = [
+    "Inputs",
+    "Examples",
+    "CMakeLists.txt",
+    "README.txt",
+    "LICENSE.txt",
+    "lit.cmake.cfg.py",
+    "get_fx_graph.py",
+    "plot_project_performance.py",
+]
 
 # test_exec_root: The root path where tests should be run.
 config.test_exec_root = os.path.join(config.project_binary_dir, "test")
