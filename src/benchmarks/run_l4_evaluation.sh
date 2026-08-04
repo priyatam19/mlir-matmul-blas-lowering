@@ -56,6 +56,7 @@ phase_preflight() {
   command -v nvidia-smi >/dev/null
   command -v compute-sanitizer >/dev/null
   command -v nvcc >/dev/null
+  command -v nsys >/dev/null
   test -x "${PYTORCH_CUDA_PYTHON}"
   test -x /opt/venv/bin/python
 
@@ -93,6 +94,7 @@ phase_preflight() {
     printf 'compiler_python='; /opt/venv/bin/python -c 'import torch; print(torch.__version__)'
     printf 'cuda_python='; "${PYTORCH_CUDA_PYTHON}" -c 'import torch; print(torch.__version__)'
     printf 'cuda_python_cuda='; "${PYTORCH_CUDA_PYTHON}" -c 'import torch; print(torch.version.cuda)'
+    printf 'nsys_version='; nsys --version | head -n1
     printf 'cuda_available='; "${PYTORCH_CUDA_PYTHON}" -c 'import torch; print(torch.cuda.is_available())'
     printf 'cudnn='; "${PYTORCH_CUDA_PYTHON}" -c 'import torch; print(torch.backends.cudnn.version())'
     nvcc --version
@@ -364,30 +366,49 @@ phase_sweeps() {
   done
 }
 
+profile_nsys() {
+  local label=$1 mode=$2 binary=$3
+  shift 3
+  local profile_dir="${RESULTS_DIR}/profiles/nsys"
+  local prefix="${profile_dir}/${label}"
+  mkdir -p "${profile_dir}"
+
+  env "$@" GPU_LOWERING="${mode}" LAUNCH_CHECK_ONLY=1 \
+    nsys profile \
+      --trace=cuda,nvtx,cublas,cudnn,osrt \
+      --sample=none --cpuctxsw=none --cuda-memory-usage=true \
+      --force-overwrite=true --output="${prefix}" \
+      "${binary}" >"${prefix}.out" 2>"${prefix}.log"
+  grep -q '^launch_check,' "${prefix}.out"
+
+  nsys stats \
+    --report cuda_api_sum,cuda_gpu_kern_gb_sum,cuda_kern_exec_sum,cuda_gpu_mem_time_sum,osrt_sum \
+    --format csv --force-overwrite=true --output="${prefix}_stats" \
+    "${prefix}.nsys-rep" >"${prefix}_stats.log" 2>&1
+}
+
 phase_profile() {
   require_marker sweeps
-  if ! command -v ncu >/dev/null; then
-    printf 'ncu unavailable; profiling skipped.\n' >"${RESULTS_DIR}/profiles/SKIPPED.txt"
-    return 0
-  fi
-  local status=0
-  env GPU_LOWERING=block-thread BLOCK_M=8 BLOCK_N=32 LAUNCH_CHECK_ONLY=1 \
-    ncu --set basic --target-processes all --csv \
-      --log-file "${RESULTS_DIR}/profiles/bmm_long.csv" \
-      "${BUILD}/benchmark-artifacts/bmm_long_block-thread_8x32/bmm_long.out" \
-      >"${RESULTS_DIR}/profiles/bmm_long.out" 2>"${RESULTS_DIR}/profiles/bmm_long.log" \
-      || status=$?
-  env GPU_LOWERING=block-thread CONV_THREADS=256 LAUNCH_CHECK_ONLY=1 \
-    ncu --set basic --target-processes all --csv \
-      --log-file "${RESULTS_DIR}/profiles/conv_resnet_block.csv" \
-      "${BUILD}/benchmark-artifacts/conv_resnet_block_block-thread_t256/conv_resnet_block.out" \
-      >"${RESULTS_DIR}/profiles/conv_resnet_block.out" \
-      2>"${RESULTS_DIR}/profiles/conv_resnet_block.log" || status=$?
-  if (( status != 0 )); then
-    printf 'ncu returned %d; profiling is non-blocking.\n' "${status}" \
-      >"${RESULTS_DIR}/profiles/SKIPPED.txt"
-  fi
-  return 0
+  command -v nsys >/dev/null
+
+  local mode binary
+  for mode in untiled block-thread vendor; do
+    binary="${BUILD}/benchmark-artifacts/bmm_long_${mode}_8x32/bmm_long.out"
+    profile_nsys "bmm_long_${mode}" "${mode}" "${binary}" BLOCK_M=8 BLOCK_N=32
+
+    binary="${BUILD}/benchmark-artifacts/conv_resnet_block_${mode}_t256/conv_resnet_block.out"
+    profile_nsys "conv_resnet_block_${mode}" "${mode}" "${binary}" CONV_THREADS=256
+  done
+
+  for mode in block-thread vendor; do
+    binary="${BUILD}/benchmark-artifacts/attention_${mode}/attention.out"
+    profile_nsys "attention_${mode}" "${mode}" "${binary}" \
+      PYTORCH_REFERENCE="${RESULTS_DIR}/references/attention.bin"
+
+    binary="${BUILD}/benchmark-artifacts/residual_conv_${mode}/residual_conv.out"
+    profile_nsys "residual_conv_${mode}" "${mode}" "${binary}" \
+      PYTORCH_REFERENCE="${RESULTS_DIR}/references/residual.bin"
+  done
 }
 
 phase_archive() {

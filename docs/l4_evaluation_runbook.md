@@ -54,8 +54,9 @@ RESULTS_DIR=/workspace/results/<existing-run> EVAL_PHASE=sanitizer \
 ```
 
 The phases are `preflight`, `build`, `correctness`, `sanitizer`, `timing`,
-`sweeps`, `profile`, and `archive`. Profiling is non-blocking when hardware
-counter permissions are unavailable. All other phase failures are blocking.
+`sweeps`, `profile`, and `archive`. The profiling phase uses Nsight Systems,
+which does not require access to GPU hardware performance counters. Every
+phase failure is blocking.
 
 ## Measurement Contract
 
@@ -70,7 +71,12 @@ counter permissions are unavailable. All other phase failures are blocking.
 - Formal timing uses 10 warmups, 50 samples, and three process-level trials.
   Mode order rotates between trials. No timed process runs concurrently.
 - Tuning uses 5 warmups and 20 samples for four BMM tiles and four convolution
-  thread counts. Nsight Compute runs only after formal measurements.
+  thread counts. Nsight Systems runs only after formal measurements and traces
+  one correctness invocation per representative mode.
+- Profiling records untiled, custom, and vendor long BMM and ResNet convolution
+  paths, plus custom and vendor attention and residual blocks. It exports
+  timeline reports and CSV summaries for CUDA APIs, kernels, memory activity,
+  launch latency, and OS runtime behavior.
 - Canonical values are medians of the three trial p10, p50, and p90 values.
 
 The summarizer enforces these performance gates:
