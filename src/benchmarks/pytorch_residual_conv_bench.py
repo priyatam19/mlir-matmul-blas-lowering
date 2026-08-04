@@ -7,8 +7,6 @@ import time
 
 import torch
 import torch.nn.functional as functional
-from torch_mlir import fx
-from torch_mlir.compiler_utils import OutputType
 
 
 class ResidualConvBlock(torch.nn.Module):
@@ -47,6 +45,9 @@ def main():
     )
     output_path = os.getenv("RESIDUAL_CONV_MLIR_OUT")
     if output_path:
+        from torch_mlir import fx
+        from torch_mlir.compiler_utils import OutputType
+
         mlir_module = fx.export_and_import(
             module,
             *cpu_inputs,

@@ -41,14 +41,24 @@ RESIDUAL_CONV_REFERENCE_OUT="${PYTORCH_REFERENCE}" REFERENCE_ONLY=1 \
   python3 "${PROJ}/src/benchmarks/pytorch_residual_conv_bench.py"
 export PYTORCH_REFERENCE
 
-if [[ "${CHECK_LAUNCHES:-0}" == "1" && "${GPU_LOWERING}" == "vendor" ]]; then
+if [[ "${CHECK_LAUNCHES:-0}" == "1" ]]; then
   diagnostic_log="$(mktemp)"
-  TUTORIAL_GPU_RUNTIME_DEBUG=1 LAUNCH_CHECK_ONLY=1 \
-    GPU_LOWERING="${GPU_LOWERING}" "${BINARY}" 2>"${diagnostic_log}"
-  call_count="$(grep -c 'op=cudnn_conv2d' "${diagnostic_log}" || true)"
-  echo "vendor_call_count=${call_count} expected=2 residual_conv_block" >&2
+  if [[ "${GPU_LOWERING}" == "vendor" ]]; then
+    MLIR_CUDA_DEBUG=1 TUTORIAL_GPU_RUNTIME_DEBUG=1 LAUNCH_CHECK_ONLY=1 \
+      GPU_LOWERING="${GPU_LOWERING}" "${BINARY}" 2>"${diagnostic_log}"
+    launch_count="$(grep -c 'Launching kernel' "${diagnostic_log}" || true)"
+    call_count="$(grep -c 'op=cudnn_conv2d' "${diagnostic_log}" || true)"
+    echo "launch_count=${launch_count} expected=7 residual_conv_block" >&2
+    echo "vendor_call_count=${call_count} expected=2 residual_conv_block" >&2
+    [[ "${launch_count}" == "7" && "${call_count}" == "2" ]]
+  else
+    MLIR_CUDA_DEBUG=1 LAUNCH_CHECK_ONLY=1 GPU_LOWERING="${GPU_LOWERING}" \
+      "${BINARY}" 2>"${diagnostic_log}"
+    launch_count="$(grep -c 'Launching kernel' "${diagnostic_log}" || true)"
+    echo "launch_count=${launch_count} expected=9 residual_conv_block" >&2
+    [[ "${launch_count}" == "9" ]]
+  fi
   rm -f "${diagnostic_log}"
-  [[ "${call_count}" == "2" ]]
 fi
 
 GPU_LOWERING="${GPU_LOWERING}" WARMUPS="${WARMUPS:-5}" RUNS="${RUNS:-20}" \

@@ -77,15 +77,17 @@ for mode in untiled block-thread vendor; do
     bash src/benchmarks/run_gpu_residual_conv_benchmark.sh
 done
 
-RESIDUAL_CONV_MLIR_OUT=src/benchmarks/gpu_residual_conv_block.mlir \
-  python3 src/benchmarks/pytorch_residual_conv_bench.py
+/opt/pytorch-cuda/bin/python \
+  src/benchmarks/pytorch_residual_conv_bench.py
 ```
 
 Run diagnostics separately from timing. `MLIR_CUDA_DEBUG=1` confirms one
 custom launch for each isolated convolution. In vendor mode,
 `TUTORIAL_GPU_RUNTIME_DEBUG=1` reports one cuDNN call per convolution along
-with its algorithm and workspace. Do not enable `CUDA_LAUNCH_BLOCKING=1`
-during timed samples.
+with its algorithm and workspace. The compiler environment generates the
+PyTorch reference; the separate `/opt/pytorch-cuda` environment is used only
+for eager-CUDA timing. Do not enable `CUDA_LAUNCH_BLOCKING=1` during timed
+samples.
 
 ## Offline Verification
 
