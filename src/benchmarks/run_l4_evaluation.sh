@@ -235,7 +235,9 @@ sanitize_binary() {
       --error-exitcode 99 "${binary}" \
       >"${RESULTS_DIR}/sanitizer/${label}.out" \
       2>"${RESULTS_DIR}/sanitizer/${label}.log"
-  grep -q 'ERROR SUMMARY: 0 errors' "${RESULTS_DIR}/sanitizer/${label}.log"
+  grep -q 'ERROR SUMMARY: 0 errors' \
+    "${RESULTS_DIR}/sanitizer/${label}.out" \
+    "${RESULTS_DIR}/sanitizer/${label}.log"
 }
 
 phase_sanitizer() {
