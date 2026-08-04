@@ -26,6 +26,17 @@ Use one 24 GB L4 and expose a direct TCP SSH endpoint so the final archive can
 be copied with SCP. The public image can be pulled without registry
 credentials.
 
+That historical image digest predates the Nsight Systems addition. Install the
+pinned CUDA 12.8 profiler package once before running preflight:
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends cuda-nsight-systems-12-8
+```
+
+Images rebuilt from the current `docker/Dockerfile.cuda` already contain this
+package and validate `nsys --version` during the image build.
+
 ## Start and Resume
 
 Clone the public repository, checkout the exact commit used to build the image,
