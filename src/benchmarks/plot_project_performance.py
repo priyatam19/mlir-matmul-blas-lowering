@@ -301,7 +301,7 @@ def make_figure(*, ncols: int = 1, width_ratios: list[float] | None = None):
 
 
 def heading(fig, title: str, subtitle: str, source: str) -> None:
-    fig.text(0.05, 0.94, title, fontsize=22, fontweight="bold", color=TEXT)
+    fig.text(0.05, 0.94, title, fontsize=19.5, fontweight="bold", color=TEXT)
     fig.text(0.05, 0.885, subtitle, fontsize=10.5, color=MUTED)
     fig.text(0.05, 0.045, source, fontsize=7.5, color=MUTED)
 
@@ -318,14 +318,17 @@ def format_ms(value: float) -> str:
 
 def save_figure(fig, output_dir: Path, name: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    svg_path = output_dir / f"{name}.svg"
     fig.savefig(
-        output_dir / f"{name}.svg",
+        svg_path,
         format="svg",
         facecolor=BG,
         edgecolor=BG,
         transparent=False,
         metadata={"Date": None, "Creator": "plot_project_performance.py"},
     )
+    svg_lines = svg_path.read_text(encoding="utf-8").splitlines()
+    svg_path.write_text("\n".join(line.rstrip() for line in svg_lines) + "\n", encoding="utf-8")
     fig.savefig(
         output_dir / f"{name}.png",
         format="png",
@@ -374,7 +377,7 @@ def plot_milestones(data: BenchmarkData, output_dir: Path) -> None:
     ax.set_yticks(y, labels)
     ax.invert_yaxis()
     ax.set_xscale("log")
-    ax.set_xlim(0.9, 110)
+    ax.set_xlim(0.9, 180)
     ax.set_xlabel("Speedup over the stage-specific untiled baseline (log scale)")
     ax.axvline(1, color=GRAY, linewidth=1.2)
     ax.axvline(10, color=AMBER, linewidth=1, linestyle="--", alpha=0.75)
@@ -384,6 +387,7 @@ def plot_milestones(data: BenchmarkData, output_dir: Path) -> None:
         if index == 1:
             detail += "  (410.6x vs legacy)"
         ax.text(value * 1.08, index, detail, va="center", color=TEXT, fontweight="bold", fontsize=9)
+    fig.subplots_adjust(left=0.20, right=0.96)
     heading(
         fig,
         "From correct lowering to meaningful GPU speedups",
@@ -431,7 +435,9 @@ def plot_gemm_scaling(data: BenchmarkData, output_dir: Path) -> None:
     ax.set_yscale("log")
     ax.set_ylabel("Device execution p50 (ms, log scale)")
     ax.set_xticks(x, labels)
-    ax.legend(ncols=4, loc="upper center", bbox_to_anchor=(0.5, 1.15))
+    handles, legend_labels = ax.get_legend_handles_labels()
+    fig.legend(handles, legend_labels, ncols=4, loc="upper center", bbox_to_anchor=(0.5, 0.84))
+    fig.subplots_adjust(top=0.76)
     heading(
         fig,
         "Block/thread mapping scales across GEMM shapes",
@@ -481,7 +487,9 @@ def plot_operator_latency(data: BenchmarkData, output_dir: Path) -> None:
         ax.set_title(panel_title, loc="left", fontweight="bold")
         ax.set_xticks(x, [label for _, label in names], fontsize=7.5)
         ax.set_ylabel("p50 latency (ms, log scale)")
-    axes[0].legend(ncols=2, loc="upper left", fontsize=8)
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, ncols=4, loc="upper center", bbox_to_anchor=(0.5, 0.84), fontsize=8)
+    fig.subplots_adjust(top=0.73)
     heading(
         fig,
         "Custom GPU mapping delivers broad operator gains",
@@ -524,10 +532,11 @@ def plot_vendor_efficiency(data: BenchmarkData, output_dir: Path) -> None:
     ax.text(0.82, 1.04, "CONV", color=AMBER, transform=ax.transAxes, fontweight="bold")
     heading(
         fig,
-        "The vendor gap depends strongly on workload shape",
+        "Custom kernels close the vendor gap unevenly",
         "Small and pointwise convolutions reach or exceed cuDNN FP32 throughput; compute-heavy kernels still have headroom.",
         "Source: unified NVIDIA L4 GFLOP/s. Direct baselines use the vendor-mode cuBLAS/cuDNN reference measurement.",
     )
+    fig.subplots_adjust(left=0.20, right=0.96)
     save_figure(fig, output_dir, FIGURES[3])
 
 
@@ -568,11 +577,13 @@ def plot_mixed_programs(data: BenchmarkData, output_dir: Path) -> None:
     ax.set_ylim(0.05, 6)
     ax.set_ylabel("p50 latency (ms, log scale)")
     ax.set_xticks(x, [label for _, _, label in programs])
-    ax.legend(ncols=4, loc="upper center", bbox_to_anchor=(0.5, 1.15), fontsize=8)
+    handles, legend_labels = ax.get_legend_handles_labels()
+    fig.legend(handles, legend_labels, ncols=4, loc="upper center", bbox_to_anchor=(0.5, 0.84), fontsize=8)
+    fig.subplots_adjust(top=0.76)
     heading(
         fig,
-        "Isolated operator gains only partially transfer to mixed programs",
-        "Generic surrounding kernels dominate both blocks; PyTorch eager remains a fused-runtime reference, not an equivalent lowering path.",
+        "Operator gains only partly transfer to full blocks",
+        "Generic kernels dominate both programs; PyTorch eager is a fused-runtime reference.",
         "Source: unified NVIDIA L4 evaluation. Whiskers show canonical p10-p90 device time.",
     )
     save_figure(fig, output_dir, FIGURES[4])
@@ -624,13 +635,24 @@ def plot_parameter_tuning(data: BenchmarkData, output_dir: Path) -> None:
                     ha="center",
                     va="center",
                     fontsize=8,
-                    color=BG if best else TEXT,
+                    color=GREEN if best else TEXT,
                     fontweight="bold" if best else "normal",
                 )
+                if best:
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (column_index - 0.49, row_index - 0.49),
+                            0.98,
+                            0.98,
+                            fill=False,
+                            edgecolor=GREEN,
+                            linewidth=2,
+                        )
+                    )
         ax.grid(False)
     heading(
         fig,
-        "Tuning is shape-dependent, but defaults remain robust",
+        "Shape-aware tuning beats one-size-fits-all defaults",
         "Each cell shows p50 latency and slowdown relative to the best configuration for that workload.",
         "Source: unified NVIDIA L4 tuning sweep, 5 warmups and 20 timed samples per configuration.",
     )
@@ -660,8 +682,7 @@ def plot_nsys_bottlenecks(output_dir: Path) -> None:
     axes[0].invert_yaxis()
     axes[0].set_xlim(0, 100)
     axes[0].set_xlabel("Share of GPU kernel time")
-    axes[0].set_title("Where GPU time goes", loc="left", fontweight="bold")
-    axes[0].legend(loc="lower right", fontsize=8)
+    axes[0].set_title("GPU-time composition", loc="left", fontweight="bold")
     for index, value in enumerate(operator_percent):
         axes[0].text(max(value + 1.5, 7), index, f"operator {value:.1f}%", va="center", fontsize=8, fontweight="bold")
 
@@ -671,20 +692,34 @@ def plot_nsys_bottlenecks(output_dir: Path) -> None:
     axes[1].set_yticks(y, labels)
     axes[1].invert_yaxis()
     axes[1].set_xlabel("One-shot traced time (ms)")
-    axes[1].set_title("Serialization tracks GPU work", loc="left", fontweight="bold")
-    axes[1].legend(loc="lower right", fontsize=8)
+    axes[1].set_title("Kernel time vs stream sync", loc="left", fontweight="bold")
+    right_limit = max(float(total.max()), float(sync.max())) * 1.10
+    axes[1].set_xlim(0, right_limit)
     for index, entry in enumerate(metrics):
         axes[1].text(
-            entry["total_ms"] + 0.05,
+            entry["total_ms"] - 0.04,
             index,
             f"{int(entry['kernel_count'])} kernels",
             va="center",
+            ha="right",
             fontsize=8,
-            color=TEXT,
+            color=BG,
+            fontweight="bold",
         )
+    left_handles, left_labels = axes[0].get_legend_handles_labels()
+    right_handles, right_labels = axes[1].get_legend_handles_labels()
+    fig.legend(
+        left_handles + right_handles,
+        left_labels + right_labels,
+        ncols=4,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.84),
+        fontsize=8,
+    )
+    fig.subplots_adjust(top=0.73)
     heading(
         fig,
-        "Nsight Systems reveals the next whole-model bottleneck",
+        "Nsight exposes the next whole-model bottleneck",
         "Mapped BMM/convolution kernels are a small fraction of mixed-program GPU time; synchronization serializes the remainder.",
         "Source: Nsight Systems 2024.6.2 correctness-only traces. Diagnostic one-shot values are not formal benchmark timings.",
     )
