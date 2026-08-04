@@ -178,6 +178,7 @@ diagnose_binary() {
   printf 'launch_count=%s expected=%s vendor_calls=%s expected=%s\n' \
     "${launches}" "${expected_launches}" "${calls}" "${expected_calls}" \
     | tee -a "${stdout}"
+  ! grep -Eq "JIT compilation failed|failed with 'CUDA_ERROR" "${stderr}"
   [[ "${launches}" == "${expected_launches}" && "${calls}" == "${expected_calls}" ]]
 }
 
