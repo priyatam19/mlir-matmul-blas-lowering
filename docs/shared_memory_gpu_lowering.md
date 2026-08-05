@@ -13,7 +13,7 @@ The optimized pass has three strategies:
 | --- | --- | --- | --- |
 | `shared-fp32` | FP32 CUDA cores and FP32 accumulation | synchronous vector loads or two-stage `cp.async` | pedantic FP32 cuBLAS/cuDNN |
 | `tensorcore-tf32` | TF32 multiply and FP32 accumulation | one or two workgroup stages | TF32 cuBLAS/cuDNN |
-| `autotuned` | strict FP32 candidate set | runtime-selected profile | exhaustive strict-FP32 candidates |
+| `autotuned` | strict FP32 or TF32, selected by `AUTOTUNE_MATH_MODE` | runtime-selected profile | exhaustive candidates in the same math mode |
 
 Unsupported element types, non-unit innermost strides, non-`sm_89` targets,
 or unsupported linalg semantics remain available to the generic lowering
@@ -41,7 +41,12 @@ bounds are handled in the kernel.
 ## Runtime Autotuning
 
 `GPU_LOWERING=autotuned` emits eight eligible implementations and a host
-`scf.index_switch`. `tutorial_autotune_begin` selects exactly one candidate;
+`scf.index_switch`. Set `AUTOTUNE_MATH_MODE=shared-fp32` (the default) or
+`AUTOTUNE_MATH_MODE=tensorcore-tf32` to choose the candidate family. The
+benchmark harness also accepts `GPU_MATH_MODE=tf32` so an autotuned TF32 kernel
+is validated and timed against TF32-enabled cuBLAS/cuDNN. The arithmetic mode
+is part of the persistent cache key, so FP32 and TF32 winners cannot collide.
+`tutorial_autotune_begin` selects exactly one candidate;
 `tutorial_autotune_end` records its CUDA-event latency. Each candidate receives
 two warmups and five samples, so an eight-candidate key converges after 56
 invocations.
@@ -60,7 +65,9 @@ TUTORIAL_AUTOTUNE_DEBUG=1
 ```
 
 Cold convergence must be reported separately. Formal timings use a populated
-cache.
+cache. On a read-only cache miss, tuning-disabled run, or short-lived process,
+candidate zero is an architecture-profile shared-memory or tensor-core default;
+the portable block/thread implementation remains the final FP32 candidate.
 
 ## Offline Verification
 
@@ -101,5 +108,7 @@ spill, barrier, and shared-memory usage.
 
 Strict FP32 uses `atol=rtol=1e-4` and relative L2 `<=1e-5`. TF32 uses
 `atol=rtol=1e-2` and relative L2 `<=5e-3` against matching-mode vendor
-libraries. GPU performance numbers should only be added after this command is
+libraries. TF32 CSV rows additionally report maximum absolute, maximum
+relative, and relative-L2 drift from a separate untimed pedantic-FP32 vendor
+reference. GPU performance numbers should only be added after this command is
 run on the L4; offline compilation is not a performance result.

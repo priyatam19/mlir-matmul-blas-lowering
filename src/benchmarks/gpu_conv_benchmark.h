@@ -74,7 +74,9 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
   const char *lowering = std::getenv("GPU_LOWERING");
   if (!lowering)
     lowering = "block-thread";
-  const bool tf32Mode = std::string(lowering) == "tensorcore-tf32";
+  const char *mathMode = std::getenv("GPU_MATH_MODE");
+  const bool tf32Mode = std::string(lowering) == "tensorcore-tf32" ||
+                        (mathMode && std::string(mathMode) == "tf32");
 
   constexpr size_t inputElements = static_cast<size_t>(N) * C * H * W;
   constexpr size_t filterElements = static_cast<size_t>(F) * C * KH * KW;
@@ -87,6 +89,7 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
   float *filterData = nullptr;
   float *outputData = nullptr;
   float *referenceData = nullptr;
+  float *pedanticReferenceData = nullptr;
   checkConvCuda(cudaMallocManaged(&inputData, inputBytes),
                 "cudaMallocManaged(input)");
   checkConvCuda(cudaMallocManaged(&filterData, filterBytes),
@@ -95,6 +98,8 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
                 "cudaMallocManaged(output)");
   checkConvCuda(cudaMallocManaged(&referenceData, outputBytes),
                 "cudaMallocManaged(reference)");
+  checkConvCuda(cudaMallocManaged(&pedanticReferenceData, outputBytes),
+                "cudaMallocManaged(pedantic reference)");
 
   for (size_t i = 0; i < inputElements; ++i)
     inputData[i] = 0.002f * static_cast<float>(static_cast<int>(i % 101) - 50);
@@ -120,6 +125,9 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
                   "prefetch output");
     checkConvCuda(cudaMemPrefetchAsync(referenceData, outputBytes, device),
                   "prefetch reference");
+    checkConvCuda(
+        cudaMemPrefetchAsync(pedanticReferenceData, outputBytes, device),
+        "prefetch pedantic reference");
     checkConvCuda(cudaDeviceSynchronize(), "prefetch synchronize");
   };
   prefetch();
@@ -206,6 +214,35 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
   checkConvCuda(cudaDeviceSynchronize(), "compiled correctness synchronize");
   runCudnn(referenceData);
   checkConvCuda(cudaDeviceSynchronize(), "cuDNN correctness synchronize");
+
+  double pedanticMaxAbsDrift = 0.0;
+  double pedanticMaxRelDrift = 0.0;
+  double pedanticSquaredDrift = 0.0;
+  double pedanticSquaredReference = 0.0;
+  if (tf32Mode) {
+    checkConvCudnn(
+        cudnnSetConvolutionMathType(convolutionDescriptor, CUDNN_FMA_MATH),
+        "cudnnSetConvolutionMathType(pedantic reference)");
+    runCudnn(pedanticReferenceData);
+    checkConvCuda(cudaDeviceSynchronize(),
+                  "cuDNN pedantic correctness synchronize");
+    checkConvCudnn(cudnnSetConvolutionMathType(convolutionDescriptor,
+                                               CUDNN_TENSOR_OP_MATH),
+                   "cudnnSetConvolutionMathType(restore TF32)");
+    for (size_t i = 0; i < outputElements; ++i) {
+      double expected = pedanticReferenceData[i];
+      double absoluteDrift =
+          std::abs(static_cast<double>(outputData[i]) - expected);
+      double relativeDrift =
+          absoluteDrift / std::max(std::abs(expected), 1.0e-6);
+      pedanticMaxAbsDrift = std::max(pedanticMaxAbsDrift, absoluteDrift);
+      pedanticMaxRelDrift = std::max(pedanticMaxRelDrift, relativeDrift);
+      pedanticSquaredDrift += absoluteDrift * absoluteDrift;
+      pedanticSquaredReference += expected * expected;
+    }
+  }
+  double pedanticRelativeL2Drift = std::sqrt(
+      pedanticSquaredDrift / std::max(pedanticSquaredReference, 1.0e-30));
 
   double maxAbsError = 0.0;
   double maxRelError = 0.0;
@@ -296,20 +333,23 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
 
   std::printf("kind,name,backend,n,c,h,w,f,kh,kw,oh,ow,stride_h,stride_w,"
               "dilation_h,dilation_w,threads,runs,p10_ms,p50_ms,p90_ms,"
-              "wall_p50_ms,gflops,max_abs,max_rel,rel_l2\n");
+              "wall_p50_ms,gflops,max_abs,max_rel,rel_l2,"
+              "pedantic_max_abs_drift,pedantic_max_rel_drift,"
+              "pedantic_rel_l2_drift\n");
   std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-              "%.9f,%.9f,%.9f,%.9f,%.3f,%.9g,%.9g,%.9g\n",
+              "%.9f,%.9f,%.9f,%.9f,%.3f,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
               name, lowering, N, C, H, W, F, KH, KW, OH, OW, StrideH, StrideW,
               DilationH, DilationW, threads, runs, compiledStats.first.p10,
               compiledStats.first.p50, compiledStats.first.p90,
               compiledStats.second.p50, gflops(compiledStats.first.p50),
-              maxAbsError, maxRelError, relativeL2);
-  std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0\n",
-              name, tf32Mode ? "cudnn-tf32" : "cudnn-pedantic-fp32", N, C,
-              H, W, F, KH, KW, OH, OW, StrideH, StrideW, DilationH,
-              DilationW, runs, cudnnStats.first.p10, cudnnStats.first.p50,
-              cudnnStats.first.p90, cudnnStats.second.p50,
-              gflops(cudnnStats.first.p50));
+              maxAbsError, maxRelError, relativeL2, pedanticMaxAbsDrift,
+              pedanticMaxRelDrift, pedanticRelativeL2Drift);
+  std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,0,%d,%.9f,%."
+              "9f,%.9f,%.9f,%.3f,0,0,0,0,0,0\n",
+              name, tf32Mode ? "cudnn-tf32" : "cudnn-pedantic-fp32", N, C, H, W,
+              F, KH, KW, OH, OW, StrideH, StrideW, DilationH, DilationW, runs,
+              cudnnStats.first.p10, cudnnStats.first.p50, cudnnStats.first.p90,
+              cudnnStats.second.p50, gflops(cudnnStats.first.p50));
 
   cudaEventDestroy(startEvent);
   cudaEventDestroy(stopEvent);
@@ -320,6 +360,7 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
   cudnnDestroyFilterDescriptor(filterDescriptor);
   cudnnDestroyTensorDescriptor(inputDescriptor);
   cudnnDestroy(cudnn);
+  cudaFree(pedanticReferenceData);
   cudaFree(referenceData);
   cudaFree(outputData);
   cudaFree(filterData);

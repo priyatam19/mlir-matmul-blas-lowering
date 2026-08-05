@@ -24,19 +24,26 @@ run_family() {
   local mode="$2"
   local shapes="$3"
   local output="$4"
+  : >"${output}"
   case "${family}" in
     gemm)
       PROJ="${PROJ}" GPU_LOWERING="${mode}" SHAPES="${shapes}" \
+        AUTOTUNE_MATH_MODE="${AUTOTUNE_MATH_MODE:-shared-fp32}" \
+        GPU_MATH_MODE="${GPU_MATH_MODE:-fp32}" \
         WARMUPS="${WARMUPS}" RUNS="${RUNS}" RESULTS_FILE="${output}" \
         bash "${PROJ}/src/benchmarks/run_gpu_gemm_benchmarks.sh"
       ;;
     bmm)
       PROJ="${PROJ}" GPU_LOWERING="${mode}" SHAPES="${shapes}" \
+        AUTOTUNE_MATH_MODE="${AUTOTUNE_MATH_MODE:-shared-fp32}" \
+        GPU_MATH_MODE="${GPU_MATH_MODE:-fp32}" \
         WARMUPS="${WARMUPS}" RUNS="${RUNS}" RESULTS_FILE="${output}" \
         bash "${PROJ}/src/benchmarks/run_gpu_bmm_benchmarks.sh"
       ;;
     conv)
       PROJ="${PROJ}" GPU_LOWERING="${mode}" SHAPES="${shapes}" \
+        AUTOTUNE_MATH_MODE="${AUTOTUNE_MATH_MODE:-shared-fp32}" \
+        GPU_MATH_MODE="${GPU_MATH_MODE:-fp32}" \
         WARMUPS="${WARMUPS}" RUNS="${RUNS}" RESULTS_FILE="${output}" \
         bash "${PROJ}/src/benchmarks/run_gpu_conv_benchmarks.sh"
       ;;
@@ -78,6 +85,22 @@ for family in gemm bmm conv; do
   done
 done
 
+for family in gemm bmm conv; do
+  case "${family}" in
+    gemm) shapes="${GEMM_SHAPES}" ;;
+    bmm) shapes="${BMM_SHAPES}" ;;
+    conv) shapes="${CONV_SHAPES}" ;;
+  esac
+  AUTOTUNE_MATH_MODE=tensorcore-tf32 GPU_MATH_MODE=tf32 \
+    WARMUPS=56 RUNS=1 run_family "${family}" autotuned "${shapes}" \
+      "${OUTPUT_DIR}/${family}_autotune_tf32_cold.csv"
+  for trial in $(seq 1 "${TRIALS}"); do
+    AUTOTUNE_MATH_MODE=tensorcore-tf32 GPU_MATH_MODE=tf32 \
+      run_family "${family}" autotuned "${shapes}" \
+        "${OUTPUT_DIR}/${family}_autotuned_tf32_trial${trial}.csv"
+  done
+done
+
 for mode in shared-fp32 tensorcore-tf32 autotuned; do
   PROJ="${PROJ}" GPU_LOWERING="${mode}" WARMUPS="${WARMUPS}" RUNS="${RUNS}" \
     bash "${PROJ}/src/benchmarks/run_gpu_attention_benchmark.sh" \
@@ -86,6 +109,15 @@ for mode in shared-fp32 tensorcore-tf32 autotuned; do
     bash "${PROJ}/src/benchmarks/run_gpu_residual_conv_benchmark.sh" \
     >"${OUTPUT_DIR}/residual_${mode}.csv"
 done
+
+AUTOTUNE_MATH_MODE=tensorcore-tf32 GPU_MATH_MODE=tf32 \
+  PROJ="${PROJ}" GPU_LOWERING=autotuned WARMUPS="${WARMUPS}" RUNS="${RUNS}" \
+  bash "${PROJ}/src/benchmarks/run_gpu_attention_benchmark.sh" \
+  >"${OUTPUT_DIR}/attention_autotuned_tf32.csv"
+AUTOTUNE_MATH_MODE=tensorcore-tf32 GPU_MATH_MODE=tf32 \
+  PROJ="${PROJ}" GPU_LOWERING=autotuned WARMUPS="${WARMUPS}" RUNS="${RUNS}" \
+  bash "${PROJ}/src/benchmarks/run_gpu_residual_conv_benchmark.sh" \
+  >"${OUTPUT_DIR}/residual_autotuned_tf32.csv"
 
 nvptx_mlir="${PROJ}/src/sample/gpu/sample_nvptx_isa.mlir"
 if [[ -f "${nvptx_mlir}" ]]; then

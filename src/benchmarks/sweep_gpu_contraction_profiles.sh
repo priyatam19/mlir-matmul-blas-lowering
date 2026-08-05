@@ -9,7 +9,7 @@ RUNS="${RUNS:-50}"
 mkdir -p "$(dirname "${RESULTS_FILE}")"
 : >"${RESULTS_FILE}"
 
-profiles=(
+strict_profiles=(
   "64 64 16 128 1"
   "64 128 16 256 1"
   "128 64 16 256 1"
@@ -19,7 +19,22 @@ profiles=(
   "128 64 32 256 2"
 )
 
+tf32_profiles=(
+  "64 64 16 128 1"
+  "64 64 16 128 2"
+  "64 128 16 128 2"
+  "64 128 16 256 2"
+  "128 64 16 128 2"
+  "128 64 16 256 2"
+  "128 128 16 256 1"
+  "128 128 16 256 2"
+)
+
 for mode in shared-fp32 tensorcore-tf32; do
+  profiles=("${strict_profiles[@]}")
+  if [[ "${mode}" == "tensorcore-tf32" ]]; then
+    profiles=("${tf32_profiles[@]}")
+  fi
   for profile in "${profiles[@]}"; do
     read -r block_m block_n block_k threads stages <<<"${profile}"
     echo "mode=${mode} profile=${block_m}x${block_n}x${block_k} threads=${threads} stages=${stages}" >&2

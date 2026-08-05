@@ -72,7 +72,9 @@ int runGpuBmmBenchmark(const char *name, CompiledBmm compiledBmm) {
   const char *lowering = std::getenv("GPU_LOWERING");
   if (!lowering)
     lowering = "block-thread";
-  const bool tf32Mode = std::string(lowering) == "tensorcore-tf32";
+  const char *mathMode = std::getenv("GPU_MATH_MODE");
+  const bool tf32Mode = std::string(lowering) == "tensorcore-tf32" ||
+                        (mathMode && std::string(mathMode) == "tf32");
 
   constexpr size_t aElements = static_cast<size_t>(Batch) * M * K;
   constexpr size_t bElements = static_cast<size_t>(Batch) * K * N;
@@ -85,11 +87,14 @@ int runGpuBmmBenchmark(const char *name, CompiledBmm compiledBmm) {
   float *bData = nullptr;
   float *cData = nullptr;
   float *referenceData = nullptr;
+  float *pedanticReferenceData = nullptr;
   checkBmmCuda(cudaMallocManaged(&aData, aBytes), "cudaMallocManaged(A)");
   checkBmmCuda(cudaMallocManaged(&bData, bBytes), "cudaMallocManaged(B)");
   checkBmmCuda(cudaMallocManaged(&cData, cBytes), "cudaMallocManaged(C)");
   checkBmmCuda(cudaMallocManaged(&referenceData, cBytes),
                "cudaMallocManaged(reference)");
+  checkBmmCuda(cudaMallocManaged(&pedanticReferenceData, cBytes),
+               "cudaMallocManaged(pedantic reference)");
 
   for (size_t i = 0; i < aElements; ++i)
     aData[i] = 0.001f * static_cast<float>(i % 101 + 1);
@@ -111,6 +116,8 @@ int runGpuBmmBenchmark(const char *name, CompiledBmm compiledBmm) {
     checkBmmCuda(cudaMemPrefetchAsync(cData, cBytes, device), "prefetch C");
     checkBmmCuda(cudaMemPrefetchAsync(referenceData, cBytes, device),
                  "prefetch reference");
+    checkBmmCuda(cudaMemPrefetchAsync(pedanticReferenceData, cBytes, device),
+                 "prefetch pedantic reference");
     checkBmmCuda(cudaDeviceSynchronize(), "prefetch synchronize");
   };
   prefetch();
@@ -137,6 +144,32 @@ int runGpuBmmBenchmark(const char *name, CompiledBmm compiledBmm) {
   checkBmmCuda(cudaDeviceSynchronize(), "compiled correctness synchronize");
   runCublas(referenceData);
   checkBmmCuda(cudaDeviceSynchronize(), "cuBLAS correctness synchronize");
+
+  double pedanticMaxAbsDrift = 0.0;
+  double pedanticMaxRelDrift = 0.0;
+  double pedanticSquaredDrift = 0.0;
+  double pedanticSquaredReference = 0.0;
+  if (tf32Mode) {
+    checkBmmCublas(cublasSetMathMode(cublas, CUBLAS_PEDANTIC_MATH),
+                   "cublasSetMathMode(pedantic reference)");
+    runCublas(pedanticReferenceData);
+    checkBmmCuda(cudaDeviceSynchronize(),
+                 "cuBLAS pedantic correctness synchronize");
+    checkBmmCublas(cublasSetMathMode(cublas, CUBLAS_TF32_TENSOR_OP_MATH),
+                   "cublasSetMathMode(restore TF32)");
+    for (size_t i = 0; i < cElements; ++i) {
+      double expected = pedanticReferenceData[i];
+      double absoluteDrift = std::abs(static_cast<double>(cData[i]) - expected);
+      double relativeDrift =
+          absoluteDrift / std::max(std::abs(expected), 1.0e-6);
+      pedanticMaxAbsDrift = std::max(pedanticMaxAbsDrift, absoluteDrift);
+      pedanticMaxRelDrift = std::max(pedanticMaxRelDrift, relativeDrift);
+      pedanticSquaredDrift += absoluteDrift * absoluteDrift;
+      pedanticSquaredReference += expected * expected;
+    }
+  }
+  double pedanticRelativeL2Drift = std::sqrt(
+      pedanticSquaredDrift / std::max(pedanticSquaredReference, 1.0e-30));
 
   double maxAbsError = 0.0;
   double maxRelError = 0.0;
@@ -224,23 +257,27 @@ int runGpuBmmBenchmark(const char *name, CompiledBmm compiledBmm) {
   };
 
   std::printf("kind,name,backend,batch,m,k,n,block_m,block_n,runs,p10_ms,"
-              "p50_ms,p90_ms,wall_p50_ms,gflops,max_abs,max_rel,rel_l2\n");
+              "p50_ms,p90_ms,wall_p50_ms,gflops,max_abs,max_rel,rel_l2,"
+              "pedantic_max_abs_drift,pedantic_max_rel_drift,"
+              "pedantic_rel_l2_drift\n");
   std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.9f,%.9f,%.9f,%.9f,"
-              "%.3f,%.9g,%.9g,%.9g\n",
+              "%.3f,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
               name, lowering, Batch, M, K, N, blockM, blockN, runs,
               compiledStats.first.p10, compiledStats.first.p50,
               compiledStats.first.p90, compiledStats.second.p50,
               gflops(compiledStats.first.p50), maxAbsError, maxRelError,
-              relativeL2);
-  std::printf("result,%s,%s,%d,%d,%d,%d,0,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0\n",
-              name, tf32Mode ? "cublas-tf32" : "cublas-pedantic-fp32",
-              Batch, M, K, N, runs, cublasStats.first.p10,
-              cublasStats.first.p50, cublasStats.first.p90,
-              cublasStats.second.p50, gflops(cublasStats.first.p50));
+              relativeL2, pedanticMaxAbsDrift, pedanticMaxRelDrift,
+              pedanticRelativeL2Drift);
+  std::printf(
+      "result,%s,%s,%d,%d,%d,%d,0,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0,0,0,0\n",
+      name, tf32Mode ? "cublas-tf32" : "cublas-pedantic-fp32", Batch, M, K, N,
+      runs, cublasStats.first.p10, cublasStats.first.p50, cublasStats.first.p90,
+      cublasStats.second.p50, gflops(cublasStats.first.p50));
 
   cudaEventDestroy(startEvent);
   cudaEventDestroy(stopEvent);
   cublasDestroy(cublas);
+  cudaFree(pedanticReferenceData);
   cudaFree(referenceData);
   cudaFree(cData);
   cudaFree(bData);
