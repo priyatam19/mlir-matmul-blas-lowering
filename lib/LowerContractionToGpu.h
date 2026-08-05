@@ -21,6 +21,7 @@ struct LowerContractionToGpuPass
   LowerContractionToGpuPass(const LowerContractionToGpuPass &other)
       : PassWrapper(other) {
     strategy = other.strategy;
+    autotuneMathMode = other.autotuneMathMode;
     target = other.target;
     blockM = other.blockM;
     blockN = other.blockN;
@@ -51,6 +52,10 @@ struct LowerContractionToGpuPass
   Option<std::string> target{
       *this, "target", llvm::cl::desc("GPU architecture profile"),
       llvm::cl::init("sm_89")};
+  Option<std::string> autotuneMathMode{
+      *this, "autotune-math-mode",
+      llvm::cl::desc("Autotuned arithmetic: shared-fp32 or tensorcore-tf32"),
+      llvm::cl::init("shared-fp32")};
   Option<int64_t> blockM{*this, "block-m",
                          llvm::cl::desc("CTA output rows"),
                          llvm::cl::init(64)};

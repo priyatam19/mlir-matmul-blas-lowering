@@ -13,11 +13,11 @@ func.func @autotuned_bmm(%lhs: memref<?x?x?xf32>,
 // CHECK: %[[BMM_CANDIDATE:.*]] = call @tutorial_autotune_begin
 // CHECK: scf.index_switch %[[BMM_CANDIDATE]]
 // CHECK: case 0 {
-// CHECK: scf.parallel
+// CHECK: gpu.launch
 // CHECK: case 1 {
 // CHECK: gpu.launch
 // CHECK: default {
-// CHECK: gpu.launch
+// CHECK: scf.parallel
 // CHECK: call @tutorial_autotune_end
 // CHECK-NOT: linalg.batch_matmul
 

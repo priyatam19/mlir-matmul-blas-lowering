@@ -4,6 +4,7 @@
 #include "mlir/Support/LLVM.h"
 
 #include <array>
+#include <cstdint>
 
 using namespace mlir;
 
@@ -23,6 +24,79 @@ int64_t sharedBColumns(const KernelConfig &config) {
   // Padding rotates K rows across banks; 32-wide K tiles retain the exact
   // 48 KiB two-stage profile budget.
   return config.blockN + (config.blockK == 16 ? 1 : 0);
+}
+
+int64_t estimateRegistersPerThread(const KernelConfig &config,
+                                   bool tensorCore) {
+  constexpr int64_t controlAndAddressRegisters = 32;
+  if (tensorCore) {
+    int64_t warps = config.threads / 32;
+    int64_t mmaTiles = (config.blockM / 16) * (config.blockN / 8);
+    int64_t accumulatorRegisters = 4 * mmaTiles / warps;
+    constexpr int64_t fragmentRegisters = 8;
+    return accumulatorRegisters + fragmentRegisters +
+           controlAndAddressRegisters;
+  }
+  int64_t accumulatorRegisters = config.blockM * config.blockN / config.threads;
+  int64_t operandRegisters =
+      config.blockM / (config.threads / 32) + config.blockN / 32;
+  return accumulatorRegisters + operandRegisters + controlAndAddressRegisters;
+}
+
+SmallVector<KernelConfig> contractionProfiles(bool tensorCore) {
+  if (tensorCore)
+    return {{128, 128, 16, 256, 4, 2}, {64, 64, 16, 128, 4, 1},
+            {64, 64, 16, 128, 4, 2},
+            {64, 128, 16, 128, 4, 2},  {64, 128, 16, 256, 4, 2},
+            {128, 64, 16, 128, 4, 2},  {128, 64, 16, 256, 4, 2},
+            {128, 128, 16, 256, 4, 1}};
+  return {{128, 128, 16, 256, 4, 2}, {64, 64, 16, 128, 4, 1},
+          {64, 128, 16, 256, 4, 1},
+          {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
+          {64, 128, 32, 256, 4, 2},
+          {128, 64, 32, 256, 4, 2}};
+}
+
+SmallVector<KernelConfig> convolutionProfiles(bool tensorCore) {
+  if (tensorCore)
+    return {{128, 128, 16, 256, 4, 1}, {64, 64, 16, 128, 4, 1},
+            {64, 128, 16, 128, 4, 1},
+            {64, 128, 16, 256, 4, 1}, {128, 64, 16, 128, 4, 1},
+            {128, 64, 16, 256, 4, 1},
+            {64, 64, 32, 128, 4, 1},  {128, 128, 32, 256, 4, 1}};
+  return {{128, 128, 16, 256, 4, 1}, {64, 64, 16, 128, 4, 1},
+          {64, 128, 16, 256, 4, 1},
+          {128, 64, 16, 256, 4, 1},
+          {64, 64, 32, 128, 4, 1},
+          {64, 128, 32, 256, 4, 1},
+          {128, 64, 32, 256, 4, 1}, {128, 128, 32, 256, 4, 1}};
+}
+
+int64_t candidateSetHash(ArrayRef<KernelConfig> profiles,
+                         bool includesBlockThread) {
+  uint64_t hash = 1469598103934665603ULL;
+  auto mix = [&](uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  mix(includesBlockThread ? 1 : 0);
+  for (const KernelConfig &profile : profiles) {
+    mix(profile.blockM);
+    mix(profile.blockN);
+    mix(profile.blockK);
+    mix(profile.threads);
+    mix(profile.vectorWidth);
+    mix(profile.stages);
+  }
+  return static_cast<int64_t>(hash);
+}
+
+void appendMemRefMetadata(OpBuilder &builder, Location loc, Value memref,
+                          SmallVectorImpl<Value> &keyValues) {
+  auto metadata =
+      memref::ExtractStridedMetadataOp::create(builder, loc, memref);
+  keyValues.push_back(metadata.getOffset());
+  llvm::append_range(keyValues, metadata.getStrides());
 }
 
 bool isContiguousF32Matrix(Value value) {
@@ -1474,7 +1548,7 @@ Value buildAutotuneKey(OpBuilder &builder, Location loc, ValueRange dimensions,
 }
 
 void lowerAutotunedMatmul(IRRewriter &rewriter, ModuleOp module,
-                          linalg::MatmulOp matmul) {
+                          linalg::MatmulOp matmul, bool tensorCore) {
   Location loc = matmul.getLoc();
   Value lhs = matmul.getDpsInputs()[0];
   Value output = matmul.getDpsInits()[0];
@@ -1482,47 +1556,57 @@ void lowerAutotunedMatmul(IRRewriter &rewriter, ModuleOp module,
   Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
   Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
   Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
+  SmallVector<KernelConfig> profiles = contractionProfiles(tensorCore);
+  SmallVector<Value> keyValues{mSize, nSize, kSize};
+  appendMemRefMetadata(rewriter, loc, lhs, keyValues);
+  appendMemRefMetadata(rewriter, loc, matmul.getDpsInputs()[1], keyValues);
+  appendMemRefMetadata(rewriter, loc, output, keyValues);
   Value key = buildAutotuneKey(
-      rewriter, loc, ValueRange{mSize, nSize, kSize},
-      0x434f4e5452414354LL);
-  Value candidateCount = arith::ConstantIntOp::create(
-      rewriter, loc, rewriter.getI64Type(), 8);
-  auto beginType = rewriter.getFunctionType(
-      {rewriter.getI64Type(), rewriter.getI64Type()},
-      {rewriter.getIndexType()});
+      rewriter, loc, keyValues,
+      0x434f4e5452414354LL ^
+          candidateSetHash(profiles, /*includesBlockThread=*/!tensorCore));
+  Value candidateCount =
+      arith::ConstantIntOp::create(rewriter, loc, rewriter.getI64Type(), 8);
+  auto beginType =
+      rewriter.getFunctionType({rewriter.getI64Type(), rewriter.getI64Type()},
+                               {rewriter.getIndexType()});
   auto endType = rewriter.getFunctionType(
       {rewriter.getI64Type(), rewriter.getIndexType()}, {});
   func::FuncOp begin = getOrCreateRuntimeFunction(
       module, rewriter, "tutorial_autotune_begin", beginType);
   func::FuncOp end = getOrCreateRuntimeFunction(
       module, rewriter, "tutorial_autotune_end", endType);
-  Value candidate =
-      func::CallOp::create(rewriter, loc, begin, ValueRange{key, candidateCount})
-          .getResult(0);
+  Value candidate = func::CallOp::create(rewriter, loc, begin,
+                                         ValueRange{key, candidateCount})
+                        .getResult(0);
 
-  SmallVector<KernelConfig> profiles{
-      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
-      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
-      {128, 128, 16, 256, 4, 2}, {64, 128, 32, 256, 4, 2},
-      {128, 64, 32, 256, 4, 2}};
   SmallVector<int64_t> cases{0, 1, 2, 3, 4, 5, 6};
-  auto dispatch = scf::IndexSwitchOp::create(
-      rewriter, loc, TypeRange{}, candidate, cases, cases.size());
+  auto dispatch = scf::IndexSwitchOp::create(rewriter, loc, TypeRange{},
+                                             candidate, cases, cases.size());
   for (Region &region : dispatch->getRegions()) {
     Block *block = rewriter.createBlock(&region);
     rewriter.setInsertionPointToEnd(block);
     scf::YieldOp::create(rewriter, loc);
   }
 
-  rewriter.setInsertionPoint(dispatch.getCaseBlock(0).getTerminator());
-  emitBlockThreadMatmul(rewriter, matmul);
-  for (size_t index = 0; index < profiles.size() - 1; ++index) {
-    rewriter.setInsertionPoint(
-        dispatch.getCaseBlock(static_cast<unsigned>(index + 1)).getTerminator());
-    emitSharedMatmulKernel(rewriter, matmul, profiles[index]);
+  if (tensorCore) {
+    for (size_t index = 0; index < profiles.size() - 1; ++index) {
+      rewriter.setInsertionPoint(
+          dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
+      emitTensorCoreMatmulKernel(rewriter, matmul, profiles[index]);
+    }
+  } else {
+    for (size_t index = 0; index < profiles.size(); ++index) {
+      rewriter.setInsertionPoint(
+          dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
+      emitSharedMatmulKernel(rewriter, matmul, profiles[index]);
+    }
   }
   rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
-  emitSharedMatmulKernel(rewriter, matmul, profiles.back());
+  if (tensorCore)
+    emitTensorCoreMatmulKernel(rewriter, matmul, profiles.back());
+  else
+    emitBlockThreadMatmul(rewriter, matmul);
 
   rewriter.setInsertionPointAfter(dispatch);
   func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
@@ -1555,7 +1639,8 @@ scf::IndexSwitchOp createAutotuneDispatch(OpBuilder &builder, Location loc,
 }
 
 void lowerAutotunedBatchMatmul(IRRewriter &rewriter, ModuleOp module,
-                               linalg::BatchMatmulOp batchMatmul) {
+                               linalg::BatchMatmulOp batchMatmul,
+                               bool tensorCore) {
   Location loc = batchMatmul.getLoc();
   Value lhs = batchMatmul.getDpsInputs()[0];
   Value output = batchMatmul.getDpsInits()[0];
@@ -1564,37 +1649,47 @@ void lowerAutotunedBatchMatmul(IRRewriter &rewriter, ModuleOp module,
   Value mSize = memref::DimOp::create(rewriter, loc, output, 1);
   Value nSize = memref::DimOp::create(rewriter, loc, output, 2);
   Value kSize = memref::DimOp::create(rewriter, loc, lhs, 2);
+  SmallVector<KernelConfig> profiles = contractionProfiles(tensorCore);
+  SmallVector<Value> keyValues{batch, mSize, nSize, kSize};
+  appendMemRefMetadata(rewriter, loc, lhs, keyValues);
+  appendMemRefMetadata(rewriter, loc, batchMatmul.getDpsInputs()[1], keyValues);
+  appendMemRefMetadata(rewriter, loc, output, keyValues);
   Value key = buildAutotuneKey(
-      rewriter, loc, ValueRange{batch, mSize, nSize, kSize},
-      0x42415443484d4dLL);
-  Value count = arith::ConstantIntOp::create(
-      rewriter, loc, rewriter.getI64Type(), 8);
+      rewriter, loc, keyValues,
+      0x42415443484d4dLL ^
+          candidateSetHash(profiles, /*includesBlockThread=*/!tensorCore));
+  Value count =
+      arith::ConstantIntOp::create(rewriter, loc, rewriter.getI64Type(), 8);
   auto [begin, end] = getAutotuneRuntimeFunctions(module, rewriter);
   Value candidate =
       func::CallOp::create(rewriter, loc, begin, ValueRange{key, count})
           .getResult(0);
   auto dispatch = createAutotuneDispatch(rewriter, loc, candidate);
-  SmallVector<KernelConfig> profiles{
-      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
-      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
-      {128, 128, 16, 256, 4, 2}, {64, 128, 32, 256, 4, 2},
-      {128, 64, 32, 256, 4, 2}};
-  rewriter.setInsertionPoint(dispatch.getCaseBlock(0).getTerminator());
-  emitBlockThreadBatchMatmul(rewriter, batchMatmul);
-  for (size_t index = 0; index < profiles.size() - 1; ++index) {
-    rewriter.setInsertionPoint(
-        dispatch.getCaseBlock(static_cast<unsigned>(index + 1)).getTerminator());
-    emitSharedBatchMatmulKernel(rewriter, batchMatmul, profiles[index]);
+  if (tensorCore) {
+    for (size_t index = 0; index < profiles.size() - 1; ++index) {
+      rewriter.setInsertionPoint(
+          dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
+      emitTensorCoreBatchMatmulKernel(rewriter, batchMatmul, profiles[index]);
+    }
+  } else {
+    for (size_t index = 0; index < profiles.size(); ++index) {
+      rewriter.setInsertionPoint(
+          dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
+      emitSharedBatchMatmulKernel(rewriter, batchMatmul, profiles[index]);
+    }
   }
   rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
-  emitSharedBatchMatmulKernel(rewriter, batchMatmul, profiles.back());
+  if (tensorCore)
+    emitTensorCoreBatchMatmulKernel(rewriter, batchMatmul, profiles.back());
+  else
+    emitBlockThreadBatchMatmul(rewriter, batchMatmul);
   rewriter.setInsertionPointAfter(dispatch);
   func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
   rewriter.eraseOp(batchMatmul);
 }
 
 void lowerAutotunedConvolution(IRRewriter &rewriter, ModuleOp module,
-                               linalg::Conv2DNchwFchwOp conv) {
+                               linalg::Conv2DNchwFchwOp conv, bool tensorCore) {
   Location loc = conv.getLoc();
   Value input = conv.getDpsInputs()[0];
   Value filter = conv.getDpsInputs()[1];
@@ -1611,30 +1706,29 @@ void lowerAutotunedConvolution(IRRewriter &rewriter, ModuleOp module,
   dimensions.push_back(memref::DimOp::create(rewriter, loc, filter, 3));
   auto strides = *getPositivePair(conv.getStrides());
   auto dilations = *getPositivePair(conv.getDilations());
-  int64_t seed = 0x434f4e56474d4dLL ^ (strides[0] << 12) ^
-                 (strides[1] << 8) ^ (dilations[0] << 4) ^ dilations[1];
+  SmallVector<KernelConfig> profiles = convolutionProfiles(tensorCore);
+  appendMemRefMetadata(rewriter, loc, input, dimensions);
+  appendMemRefMetadata(rewriter, loc, filter, dimensions);
+  appendMemRefMetadata(rewriter, loc, output, dimensions);
+  int64_t seed = 0x434f4e56474d4dLL ^
+                 candidateSetHash(profiles, /*includesBlockThread=*/false) ^
+                 (strides[0] << 12) ^ (strides[1] << 8) ^ (dilations[0] << 4) ^
+                 dilations[1];
   Value key = buildAutotuneKey(rewriter, loc, dimensions, seed);
-  Value count = arith::ConstantIntOp::create(
-      rewriter, loc, rewriter.getI64Type(), 8);
+  Value count =
+      arith::ConstantIntOp::create(rewriter, loc, rewriter.getI64Type(), 8);
   auto [begin, end] = getAutotuneRuntimeFunctions(module, rewriter);
   Value candidate =
       func::CallOp::create(rewriter, loc, begin, ValueRange{key, count})
           .getResult(0);
   auto dispatch = createAutotuneDispatch(rewriter, loc, candidate);
-  SmallVector<KernelConfig> profiles{
-      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
-      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
-      {64, 64, 32, 128, 4, 1},   {64, 128, 32, 256, 4, 1},
-      {128, 64, 32, 256, 4, 1},  {128, 128, 32, 256, 4, 1}};
   for (size_t index = 0; index < profiles.size() - 1; ++index) {
     rewriter.setInsertionPoint(
         dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
-    emitConvolutionKernel(rewriter, conv, profiles[index],
-                          /*tensorCore=*/false);
+    emitConvolutionKernel(rewriter, conv, profiles[index], tensorCore);
   }
   rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
-  emitConvolutionKernel(rewriter, conv, profiles.back(),
-                        /*tensorCore=*/false);
+  emitConvolutionKernel(rewriter, conv, profiles.back(), tensorCore);
   rewriter.setInsertionPointAfter(dispatch);
   func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
   rewriter.eraseOp(conv);
@@ -1650,6 +1744,13 @@ void LowerContractionToGpuPass::runOnOperation() {
                                << strategy;
     return signalPassFailure();
   }
+  if (strategy == "autotuned" && autotuneMathMode != "shared-fp32" &&
+      autotuneMathMode != "tensorcore-tf32") {
+    getOperation().emitError()
+        << "unknown autotune math mode: " << autotuneMathMode;
+    return signalPassFailure();
+  }
+  bool autotuneTensorCore = autotuneMathMode == "tensorcore-tf32";
   if (target != "sm_89")
     return;
   if (config.blockM <= 0 || config.blockN <= 0 || config.blockK <= 0 ||
@@ -1684,6 +1785,18 @@ void LowerContractionToGpuPass::runOnOperation() {
         << " bytes of workgroup memory; limit is 49152";
     return signalPassFailure();
   }
+  bool tensorCoreConfig = strategy == "tensorcore-tf32" ||
+                          (strategy == "autotuned" && autotuneTensorCore);
+  int64_t estimatedRegisters =
+      estimateRegistersPerThread(config, tensorCoreConfig);
+  constexpr int64_t registerEstimateLimit = 192;
+  if (estimatedRegisters > registerEstimateLimit) {
+    getOperation().emitError()
+        << "GPU contraction configuration is estimated to use "
+        << estimatedRegisters << " registers per thread; limit is "
+        << registerEstimateLimit;
+    return signalPassFailure();
+  }
   SmallVector<linalg::MatmulOp> worklist;
   getOperation().walk([&](linalg::MatmulOp matmul) {
     if (isSupportedMatmul(matmul))
@@ -1703,7 +1816,8 @@ void LowerContractionToGpuPass::runOnOperation() {
   IRRewriter rewriter(&getContext());
   for (linalg::MatmulOp matmul : worklist) {
     if (strategy == "autotuned") {
-      lowerAutotunedMatmul(rewriter, getOperation(), matmul);
+      lowerAutotunedMatmul(rewriter, getOperation(), matmul,
+                           autotuneTensorCore);
       continue;
     }
     rewriter.setInsertionPoint(matmul);
@@ -1715,7 +1829,8 @@ void LowerContractionToGpuPass::runOnOperation() {
   }
   for (linalg::BatchMatmulOp batchMatmul : batchWorklist) {
     if (strategy == "autotuned") {
-      lowerAutotunedBatchMatmul(rewriter, getOperation(), batchMatmul);
+      lowerAutotunedBatchMatmul(rewriter, getOperation(), batchMatmul,
+                                autotuneTensorCore);
       continue;
     }
     rewriter.setInsertionPoint(batchMatmul);
@@ -1727,7 +1842,8 @@ void LowerContractionToGpuPass::runOnOperation() {
   }
   for (linalg::Conv2DNchwFchwOp conv : convolutionWorklist) {
     if (strategy == "autotuned") {
-      lowerAutotunedConvolution(rewriter, getOperation(), conv);
+      lowerAutotunedConvolution(rewriter, getOperation(), conv,
+                                autotuneTensorCore);
       continue;
     }
     rewriter.setInsertionPoint(conv);

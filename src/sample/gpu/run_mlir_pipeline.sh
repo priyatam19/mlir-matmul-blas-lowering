@@ -19,6 +19,7 @@ CONTRACTION_BLOCK_N="${CONTRACTION_BLOCK_N:-64}"
 CONTRACTION_BLOCK_K="${CONTRACTION_BLOCK_K:-16}"
 CONTRACTION_THREADS="${CONTRACTION_THREADS:-256}"
 CONTRACTION_STAGES="${CONTRACTION_STAGES:-1}"
+AUTOTUNE_MATH_MODE="${AUTOTUNE_MATH_MODE:-shared-fp32}"
 TILE_M="${TILE_M:-16}"
 TILE_N="${TILE_N:-16}"
 TILE_K="${TILE_K:-256}"
@@ -84,7 +85,7 @@ case "${GPU_LOWERING}" in
   autotuned)
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
-        --lower-contraction-to-gpu="strategy=autotuned target=${CUDA_CHIP}" \
+        --lower-contraction-to-gpu="strategy=autotuned target=${CUDA_CHIP} autotune-math-mode=${AUTOTUNE_MATH_MODE}" \
         -o "${BUFFERIZED_MLIR}"
     ;;
   vendor)
