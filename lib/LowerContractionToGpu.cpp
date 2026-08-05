@@ -29,6 +29,16 @@ bool isContiguousF32Matrix(Value value) {
   return strides.back() == 1;
 }
 
+bool isContiguousF32Batch(Value value) {
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!type || type.getRank() != 3 || !type.getElementType().isF32())
+    return false;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  return succeeded(type.getStridesAndOffset(strides, offset)) &&
+         strides.back() == 1;
+}
+
 bool isSupportedMatmul(linalg::MatmulOp matmul) {
   if (matmul->getNumResults() != 0 ||
       !linalg::MatmulOp::isDefaultIndexingMaps(matmul.getIndexingMapsAttr()))
@@ -39,6 +49,27 @@ bool isSupportedMatmul(linalg::MatmulOp matmul) {
          isContiguousF32Matrix(inputs[0]) &&
          isContiguousF32Matrix(inputs[1]) &&
          isContiguousF32Matrix(outputs[0]);
+}
+
+bool isSupportedBatchMatmul(linalg::BatchMatmulOp batchMatmul) {
+  if (batchMatmul->getNumResults() != 0 ||
+      !linalg::BatchMatmulOp::isDefaultIndexingMaps(
+          batchMatmul.getIndexingMapsAttr()))
+    return false;
+  auto inputs = batchMatmul.getDpsInputs();
+  auto outputs = batchMatmul.getDpsInits();
+  return inputs.size() == 2 && outputs.size() == 1 &&
+         isContiguousF32Batch(inputs[0]) &&
+         isContiguousF32Batch(inputs[1]) &&
+         isContiguousF32Batch(outputs[0]);
+}
+
+SmallVector<Value> matrixIndices(Value batch, Value row, Value column) {
+  SmallVector<Value> indices;
+  if (batch)
+    indices.push_back(batch);
+  indices.append({row, column});
+  return indices;
 }
 
 Value indexConstant(OpBuilder &builder, Location loc, int64_t value) {
@@ -90,8 +121,9 @@ void guardedStore(OpBuilder &builder, Location loc, Value value, Value target,
 }
 
 void emitVectorizedTileLoad(OpBuilder &builder, Location loc, Value source,
-                            Value shared, Value globalRow, Value globalColumn,
-                            Value localRow, Value localColumn, Value rowLimit,
+                            Value shared, Value batch, Value globalRow,
+                            Value globalColumn, Value localRow,
+                            Value localColumn, Value rowLimit,
                             Value columnLimit, Value zeroFloat,
                             int64_t vectorWidth) {
   Value lastLane = indexConstant(builder, loc, vectorWidth - 1);
@@ -107,7 +139,8 @@ void emitVectorizedTileLoad(OpBuilder &builder, Location loc, Value source,
   builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
   auto vectorType = VectorType::get({vectorWidth}, builder.getF32Type());
   Value loaded = vector::LoadOp::create(
-      builder, loc, vectorType, source, ValueRange{globalRow, globalColumn});
+      builder, loc, vectorType, source,
+      matrixIndices(batch, globalRow, globalColumn));
   vector::StoreOp::create(builder, loc, loaded, shared,
                           ValueRange{localRow, localColumn});
   scf::YieldOp::create(builder, loc);
@@ -121,9 +154,9 @@ void emitVectorizedTileLoad(OpBuilder &builder, Location loc, Value source,
         arith::AddIOp::create(builder, loc, localColumn, laneValue);
     Value condition = inBounds2D(builder, loc, globalRow, rowLimit,
                                  sourceColumn, columnLimit);
-    Value scalar = guardedLoad(builder, loc, source,
-                               ValueRange{globalRow, sourceColumn}, condition,
-                               zeroFloat);
+    Value scalar = guardedLoad(
+        builder, loc, source, matrixIndices(batch, globalRow, sourceColumn),
+        condition, zeroFloat);
     memref::StoreOp::create(builder, loc, scalar, shared,
                             ValueRange{localRow, destinationColumn});
   }
@@ -133,9 +166,9 @@ void emitVectorizedTileLoad(OpBuilder &builder, Location loc, Value source,
 
 void emitCooperativeTileLoads(OpBuilder &builder, Location loc, Value lhs,
                               Value rhs, Value sharedA, Value sharedB,
-                              Value blockRow, Value blockColumn, Value kBase,
-                              Value threadId, Value mSize, Value nSize,
-                              Value kSize, Value zeroFloat,
+                              Value batch, Value blockRow, Value blockColumn,
+                              Value kBase, Value threadId, Value mSize,
+                              Value nSize, Value kSize, Value zeroFloat,
                               const KernelConfig &config) {
   Value blockKValue = indexConstant(builder, loc, config.blockK);
   Value blockNValue = indexConstant(builder, loc, config.blockN);
@@ -160,8 +193,8 @@ void emitCooperativeTileLoads(OpBuilder &builder, Location loc, Value lhs,
     Value globalRow =
         arith::AddIOp::create(builder, loc, blockRow, localRow);
     Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
-    emitVectorizedTileLoad(builder, loc, lhs, sharedA, globalRow, globalK,
-                           localRow, localK, mSize, kSize, zeroFloat,
+    emitVectorizedTileLoad(builder, loc, lhs, sharedA, batch, globalRow,
+                           globalK, localRow, localK, mSize, kSize, zeroFloat,
                            config.vectorWidth);
   }
 
@@ -178,8 +211,9 @@ void emitCooperativeTileLoads(OpBuilder &builder, Location loc, Value lhs,
     Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
     Value globalColumn =
         arith::AddIOp::create(builder, loc, blockColumn, localColumn);
-    emitVectorizedTileLoad(builder, loc, rhs, sharedB, globalK, globalColumn,
-                           localK, localColumn, kSize, nSize, zeroFloat,
+    emitVectorizedTileLoad(builder, loc, rhs, sharedB, batch, globalK,
+                           globalColumn, localK, localColumn, kSize, nSize,
+                           zeroFloat,
                            config.vectorWidth);
   }
 }
@@ -207,9 +241,9 @@ Value availableVectorElements(OpBuilder &builder, Location loc, Value row,
 }
 
 Value emitAsyncVectorCopy(OpBuilder &builder, Location loc, Value source,
-                          Value shared, Value stage, Value globalRow,
-                          Value globalColumn, Value localRow, Value localColumn,
-                          Value rowLimit, Value columnLimit,
+                          Value shared, Value batch, Value stage,
+                          Value globalRow, Value globalColumn, Value localRow,
+                          Value localColumn, Value rowLimit, Value columnLimit,
                           int64_t vectorWidth) {
   Value rowOk = arith::CmpIOp::create(builder, loc,
                                       arith::CmpIPredicate::ult, globalRow,
@@ -228,16 +262,18 @@ Value emitAsyncVectorCopy(OpBuilder &builder, Location loc, Value source,
   return nvgpu::DeviceAsyncCopyOp::create(
       builder, loc, tokenType, shared,
       ValueRange{stage, localRow, localColumn}, source,
-      ValueRange{safeRow, safeColumn}, builder.getIndexAttr(vectorWidth),
+      matrixIndices(batch, safeRow, safeColumn),
+      builder.getIndexAttr(vectorWidth),
       sourceElements,
       vectorWidth == 4 ? builder.getUnitAttr() : UnitAttr());
 }
 
 Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
                          Value rhs, Value sharedA, Value sharedB,
-                         Value stage, Value blockRow, Value blockColumn,
-                         Value kBase, Value threadId, Value mSize, Value nSize,
-                         Value kSize, const KernelConfig &config) {
+                         Value batch, Value stage, Value blockRow,
+                         Value blockColumn, Value kBase, Value threadId,
+                         Value mSize, Value nSize, Value kSize,
+                         const KernelConfig &config) {
   Value blockKValue = indexConstant(builder, loc, config.blockK);
   Value blockNValue = indexConstant(builder, loc, config.blockN);
   Value vectorWidthValue = indexConstant(builder, loc, config.vectorWidth);
@@ -263,7 +299,7 @@ Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
         arith::AddIOp::create(builder, loc, blockRow, localRow);
     Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
     tokens.push_back(emitAsyncVectorCopy(
-        builder, loc, lhs, sharedA, stage, globalRow, globalK, localRow,
+        builder, loc, lhs, sharedA, batch, stage, globalRow, globalK, localRow,
         localK, mSize, kSize, config.vectorWidth));
   }
 
@@ -281,7 +317,7 @@ Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
     Value globalColumn =
         arith::AddIOp::create(builder, loc, blockColumn, localColumn);
     tokens.push_back(emitAsyncVectorCopy(
-        builder, loc, rhs, sharedB, stage, globalK, globalColumn, localK,
+        builder, loc, rhs, sharedB, batch, stage, globalK, globalColumn, localK,
         localColumn, kSize, nSize, config.vectorWidth));
   }
 
@@ -302,9 +338,9 @@ Value insertVectorElement(OpBuilder &builder, Location loc, Value scalar,
 }
 
 Value initializeTensorCoreAccumulator(OpBuilder &builder, Location loc,
-                                      Value output, Value row0, Value row1,
-                                      Value column, Value mSize, Value nSize,
-                                      Value zeroFloat) {
+                                      Value output, Value batch, Value row0,
+                                      Value row1, Value column, Value mSize,
+                                      Value nSize, Value zeroFloat) {
   auto accumulatorType = VectorType::get({2, 2}, builder.getF32Type());
   Value accumulator = zeroVector(builder, loc, accumulatorType);
   for (int64_t row = 0; row < 2; ++row) {
@@ -314,9 +350,9 @@ Value initializeTensorCoreAccumulator(OpBuilder &builder, Location loc,
           builder, loc, column, indexConstant(builder, loc, columnLane));
       Value condition = inBounds2D(builder, loc, globalRow, mSize,
                                    globalColumn, nSize);
-      Value initial = guardedLoad(builder, loc, output,
-                                  ValueRange{globalRow, globalColumn},
-                                  condition, zeroFloat);
+      Value initial = guardedLoad(
+          builder, loc, output,
+          matrixIndices(batch, globalRow, globalColumn), condition, zeroFloat);
       accumulator = insertVectorElement(builder, loc, initial, accumulator,
                                         {row, columnLane});
     }
@@ -362,20 +398,24 @@ Value emitTensorCoreMma(OpBuilder &builder, Location loc, Value sharedA,
                                   /*tf32Enabled=*/true);
 }
 
-void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
-                                linalg::MatmulOp matmul,
-                                const KernelConfig &config) {
-  Location loc = matmul.getLoc();
-  Value lhs = matmul.getDpsInputs()[0];
-  Value rhs = matmul.getDpsInputs()[1];
-  Value output = matmul.getDpsInits()[0];
+void emitTensorCoreContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
+                                     Value lhs, Value rhs, Value output,
+                                     bool batched,
+                                     const KernelConfig &config) {
+  Location loc = sourceOp->getLoc();
   Value zero = indexConstant(rewriter, loc, 0);
   Value one = indexConstant(rewriter, loc, 1);
   Value zeroFloat = arith::ConstantFloatOp::create(
       rewriter, loc, rewriter.getF32Type(), APFloat(0.0f));
-  Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
-  Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
-  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
+  int64_t matrixOffset = batched ? 1 : 0;
+  Value batchSize = batched
+                        ? memref::DimOp::create(rewriter, loc, output, 0)
+                        : one;
+  Value mSize =
+      memref::DimOp::create(rewriter, loc, output, matrixOffset);
+  Value nSize =
+      memref::DimOp::create(rewriter, loc, output, matrixOffset + 1);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, matrixOffset + 1);
   Value gridX = ceilDiv(rewriter, loc, nSize, config.blockN);
   Value gridY = ceilDiv(rewriter, loc, mSize, config.blockM);
   Value blockSize = indexConstant(rewriter, loc, config.threads);
@@ -389,7 +429,7 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
       {config.blockK, config.blockN}, rewriter.getF32Type(),
       MemRefLayoutAttrInterface{}, workgroupSpace);
   auto launch = gpu::LaunchOp::create(
-      rewriter, loc, gridX, gridY, one, blockSize, one, one,
+      rewriter, loc, gridX, gridY, batchSize, blockSize, one, one,
       /*dynamicSharedMemorySize=*/nullptr, /*asyncTokenType=*/nullptr,
       /*asyncDependencies=*/ValueRange{},
       SmallVector<Type>{sharedAType, sharedBType});
@@ -398,6 +438,7 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
   rewriter.setInsertionPointToStart(&body);
   Value blockX = launch.getBlockIds().x;
   Value blockY = launch.getBlockIds().y;
+  Value batch = batched ? launch.getBlockIds().z : Value();
   Value threadId = launch.getThreadIds().x;
   Value sharedA = body.getArgument(gpu::LaunchOp::kNumConfigRegionAttributes);
   Value sharedB =
@@ -451,7 +492,8 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
     column = arith::AddIOp::create(rewriter, loc, column, laneColumn);
     warpTiles.push_back({localM, localN, row0, row1, column});
     accumulators.push_back(initializeTensorCoreAccumulator(
-        rewriter, loc, output, row0, row1, column, mSize, nSize, zeroFloat));
+        rewriter, loc, output, batch, row0, row1, column, mSize, nSize,
+        zeroFloat));
   }
 
   Value blockKValue = indexConstant(rewriter, loc, config.blockK);
@@ -459,10 +501,10 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
       rewriter, loc, zero, kSize, blockKValue, accumulators,
       [&](OpBuilder &tileBuilder, Location tileLoc, Value kBase,
           ValueRange tileAccumulators) {
-        emitCooperativeTileLoads(tileBuilder, tileLoc, lhs, rhs, sharedA,
-                                 sharedB, blockRow, blockColumn, kBase,
-                                 threadId, mSize, nSize, kSize, zeroFloat,
-                                 config);
+        emitCooperativeTileLoads(
+            tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch, blockRow,
+            blockColumn, kBase, threadId, mSize, nSize, kSize, zeroFloat,
+            config);
         gpu::BarrierOp::create(tileBuilder, tileLoc,
                                gpu::AddressSpace::Workgroup);
         SmallVector<Value> next(tileAccumulators.begin(),
@@ -494,7 +536,7 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
         Value condition = inBounds2D(rewriter, loc, globalRow, mSize,
                                      globalColumn, nSize);
         guardedStore(rewriter, loc, scalar, output,
-                     ValueRange{globalRow, globalColumn}, condition);
+                     matrixIndices(batch, globalRow, globalColumn), condition);
       }
     }
   }
@@ -502,20 +544,24 @@ void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
   rewriter.setInsertionPointAfter(launch);
 }
 
-void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
-                            const KernelConfig &config) {
-  Location loc = matmul.getLoc();
-  Value lhs = matmul.getDpsInputs()[0];
-  Value rhs = matmul.getDpsInputs()[1];
-  Value output = matmul.getDpsInits()[0];
+void emitSharedContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
+                                 Value lhs, Value rhs, Value output,
+                                 bool batched, const KernelConfig &config) {
+  Location loc = sourceOp->getLoc();
 
   Value one = indexConstant(rewriter, loc, 1);
   Value zero = indexConstant(rewriter, loc, 0);
   Value zeroFloat = arith::ConstantFloatOp::create(
       rewriter, loc, rewriter.getF32Type(), APFloat(0.0f));
-  Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
-  Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
-  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
+  int64_t matrixOffset = batched ? 1 : 0;
+  Value batchSize = batched
+                        ? memref::DimOp::create(rewriter, loc, output, 0)
+                        : one;
+  Value mSize =
+      memref::DimOp::create(rewriter, loc, output, matrixOffset);
+  Value nSize =
+      memref::DimOp::create(rewriter, loc, output, matrixOffset + 1);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, matrixOffset + 1);
   Value gridX = ceilDiv(rewriter, loc, nSize, config.blockN);
   Value gridY = ceilDiv(rewriter, loc, mSize, config.blockM);
   Value blockSize = indexConstant(rewriter, loc, config.threads);
@@ -540,7 +586,7 @@ void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
                                      workgroupSpace);
   SmallVector<Type> workgroupTypes{sharedAType, sharedBType};
   auto launch = gpu::LaunchOp::create(
-      rewriter, loc, gridX, gridY, one, blockSize, one, one,
+      rewriter, loc, gridX, gridY, batchSize, blockSize, one, one,
       /*dynamicSharedMemorySize=*/nullptr, /*asyncTokenType=*/nullptr,
       /*asyncDependencies=*/ValueRange{}, workgroupTypes);
 
@@ -548,6 +594,7 @@ void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
   rewriter.setInsertionPointToStart(&body);
   Value blockX = launch.getBlockIds().x;
   Value blockY = launch.getBlockIds().y;
+  Value batch = batched ? launch.getBlockIds().z : Value();
   Value threadId = launch.getThreadIds().x;
   Value sharedA = body.getArgument(gpu::LaunchOp::kNumConfigRegionAttributes);
   Value sharedB =
@@ -591,14 +638,15 @@ void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
       Value condition =
           inBounds2D(rewriter, loc, row, mSize, column, nSize);
       accumulators.push_back(guardedLoad(
-          rewriter, loc, output, ValueRange{row, column}, condition, zeroFloat));
+          rewriter, loc, output, matrixIndices(batch, row, column), condition,
+          zeroFloat));
     }
   }
 
   if (config.stages == 2) {
     Value initialGroup = emitAsyncTileLoads(
-        rewriter, loc, lhs, rhs, sharedA, sharedB, zero, blockRow, blockColumn,
-        zero, threadId, mSize, nSize, kSize, config);
+        rewriter, loc, lhs, rhs, sharedA, sharedB, batch, zero, blockRow,
+        blockColumn, zero, threadId, mSize, nSize, kSize, config);
     nvgpu::DeviceAsyncWaitOp::create(rewriter, loc, initialGroup, nullptr);
     gpu::BarrierOp::create(rewriter, loc, gpu::AddressSpace::Workgroup);
   }
@@ -620,14 +668,14 @@ void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
           Value nextK = arith::AddIOp::create(tileBuilder, tileLoc, kBase,
                                               blockKValue);
           nextGroup = emitAsyncTileLoads(
-              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, nextStage,
-              blockRow, blockColumn, nextK, threadId, mSize, nSize, kSize,
-              config);
+              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch,
+              nextStage, blockRow, blockColumn, nextK, threadId, mSize, nSize,
+              kSize, config);
         } else {
-          emitCooperativeTileLoads(tileBuilder, tileLoc, lhs, rhs, sharedA,
-                                   sharedB, blockRow, blockColumn, kBase,
-                                   threadId, mSize, nSize, kSize, zeroFloat,
-                                   config);
+          emitCooperativeTileLoads(
+              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch,
+              blockRow, blockColumn, kBase, threadId, mSize, nSize, kSize,
+              zeroFloat, config);
           gpu::BarrierOp::create(tileBuilder, tileLoc,
                                  gpu::AddressSpace::Workgroup);
         }
@@ -687,11 +735,46 @@ void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
       Value condition =
           inBounds2D(rewriter, loc, row, mSize, column, nSize);
       guardedStore(rewriter, loc, kTiles.getResult(index++), output,
-                   ValueRange{row, column}, condition);
+                   matrixIndices(batch, row, column), condition);
     }
   }
   gpu::TerminatorOp::create(rewriter, loc);
   rewriter.setInsertionPointAfter(launch);
+}
+
+void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
+                            const KernelConfig &config) {
+  emitSharedContractionKernel(rewriter, matmul, matmul.getDpsInputs()[0],
+                              matmul.getDpsInputs()[1],
+                              matmul.getDpsInits()[0], /*batched=*/false,
+                              config);
+}
+
+void emitSharedBatchMatmulKernel(IRRewriter &rewriter,
+                                 linalg::BatchMatmulOp batchMatmul,
+                                 const KernelConfig &config) {
+  emitSharedContractionKernel(
+      rewriter, batchMatmul, batchMatmul.getDpsInputs()[0],
+      batchMatmul.getDpsInputs()[1], batchMatmul.getDpsInits()[0],
+      /*batched=*/true, config);
+}
+
+void emitTensorCoreMatmulKernel(IRRewriter &rewriter,
+                                linalg::MatmulOp matmul,
+                                const KernelConfig &config) {
+  emitTensorCoreContractionKernel(rewriter, matmul, matmul.getDpsInputs()[0],
+                                  matmul.getDpsInputs()[1],
+                                  matmul.getDpsInits()[0], /*batched=*/false,
+                                  config);
+}
+
+void emitTensorCoreBatchMatmulKernel(IRRewriter &rewriter,
+                                     linalg::BatchMatmulOp batchMatmul,
+                                     const KernelConfig &config) {
+  emitTensorCoreContractionKernel(
+      rewriter, batchMatmul, batchMatmul.getDpsInputs()[0],
+      batchMatmul.getDpsInputs()[1], batchMatmul.getDpsInits()[0],
+      /*batched=*/true, config);
 }
 
 void emitBlockThreadMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul) {
@@ -886,6 +969,11 @@ void LowerContractionToGpuPass::runOnOperation() {
     if (isSupportedMatmul(matmul))
       worklist.push_back(matmul);
   });
+  SmallVector<linalg::BatchMatmulOp> batchWorklist;
+  getOperation().walk([&](linalg::BatchMatmulOp batchMatmul) {
+    if (isSupportedBatchMatmul(batchMatmul))
+      batchWorklist.push_back(batchMatmul);
+  });
 
   IRRewriter rewriter(&getContext());
   for (linalg::MatmulOp matmul : worklist) {
@@ -899,6 +987,14 @@ void LowerContractionToGpuPass::runOnOperation() {
     else
       emitSharedMatmulKernel(rewriter, matmul, config);
     rewriter.eraseOp(matmul);
+  }
+  for (linalg::BatchMatmulOp batchMatmul : batchWorklist) {
+    rewriter.setInsertionPoint(batchMatmul);
+    if (strategy == "tensorcore-tf32")
+      emitTensorCoreBatchMatmulKernel(rewriter, batchMatmul, config);
+    else
+      emitSharedBatchMatmulKernel(rewriter, batchMatmul, config);
+    rewriter.eraseOp(batchMatmul);
   }
 }
 

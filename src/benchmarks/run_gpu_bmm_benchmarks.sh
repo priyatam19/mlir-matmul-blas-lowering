@@ -14,8 +14,10 @@ SHAPES="${SHAPES:-bmm_bert bmm_long bmm_value bmm_irregular}"
 
 if [[ "${GPU_LOWERING}" != "untiled" &&
       "${GPU_LOWERING}" != "block-thread" &&
+      "${GPU_LOWERING}" != "shared-fp32" &&
+      "${GPU_LOWERING}" != "tensorcore-tf32" &&
       "${GPU_LOWERING}" != "vendor" ]]; then
-  echo "Batch matmul benchmarks support GPU_LOWERING=untiled, block-thread, or vendor." >&2
+  echo "Batch matmul benchmarks support GPU_LOWERING=untiled, block-thread, shared-fp32, tensorcore-tf32, or vendor." >&2
   exit 2
 fi
 
