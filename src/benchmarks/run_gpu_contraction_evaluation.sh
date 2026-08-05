@@ -110,4 +110,23 @@ if command -v nsys >/dev/null 2>&1; then
   fi
 fi
 
+BUILD="${BUILD:-${PROJ}/build-ninja}"
+declare -a sanitizer_binaries=(
+  "${PROJ}/src/sample/gpu/gemm_irregular_autotuned_8x32.out"
+  "${BUILD}/benchmark-artifacts/bmm_irregular_autotuned_8x32/bmm_irregular.out"
+  "${BUILD}/benchmark-artifacts/conv_irregular_autotuned_t256/conv_irregular.out"
+)
+if command -v compute-sanitizer >/dev/null 2>&1; then
+  : >"${OUTPUT_DIR}/compute_sanitizer.txt"
+  for binary in "${sanitizer_binaries[@]}"; do
+    if [[ -x "${binary}" ]]; then
+      TUTORIAL_AUTOTUNE_READ_ONLY=1 LAUNCH_CHECK_ONLY=1 \
+        compute-sanitizer --tool memcheck --error-exitcode=99 "${binary}" \
+        >>"${OUTPUT_DIR}/compute_sanitizer.txt" 2>&1
+    fi
+  done
+fi
+
+python3 "${PROJ}/src/benchmarks/analyze_contraction_results.py" "${OUTPUT_DIR}"
+
 echo "Evaluation artifacts: ${OUTPUT_DIR}"

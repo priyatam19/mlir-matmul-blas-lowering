@@ -27,6 +27,7 @@ for mode in shared-fp32 tensorcore-tf32; do
       CONTRACTION_BLOCK_M="${block_m}" CONTRACTION_BLOCK_N="${block_n}" \
       CONTRACTION_BLOCK_K="${block_k}" CONTRACTION_THREADS="${threads}" \
       CONTRACTION_STAGES="${stages}" WARMUPS="${WARMUPS}" RUNS="${RUNS}" \
+      BLOCK_M="${block_m}" BLOCK_N="${block_n}" \
       RESULTS_FILE="${RESULTS_FILE}" \
       bash "${PROJ}/src/benchmarks/run_gpu_gemm_benchmarks.sh"
   done

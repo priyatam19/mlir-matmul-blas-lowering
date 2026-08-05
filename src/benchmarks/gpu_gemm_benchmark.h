@@ -70,6 +70,11 @@ int runGpuGemmBenchmark(const char *name, CompiledGemm compiledGemm) {
   const int runs = envInt("RUNS", 50);
   const int blockM = envInt("BLOCK_M", 8);
   const int blockN = envInt("BLOCK_N", 32);
+  const int contractionBlockM = envInt("CONTRACTION_BLOCK_M", blockM);
+  const int contractionBlockN = envInt("CONTRACTION_BLOCK_N", blockN);
+  const int contractionBlockK = envInt("CONTRACTION_BLOCK_K", 16);
+  const int contractionThreads = envInt("CONTRACTION_THREADS", 256);
+  const int contractionStages = envInt("CONTRACTION_STAGES", 1);
   const char *lowering = std::getenv("GPU_LOWERING");
   if (!lowering)
     lowering = "block-thread";
@@ -222,16 +227,17 @@ int runGpuGemmBenchmark(const char *name, CompiledGemm compiledGemm) {
     return operations / (milliseconds * 1.0e6);
   };
 
-  std::printf("kind,name,backend,m,k,n,block_m,block_n,runs,p10_ms,p50_ms,"
+  std::printf("kind,name,backend,m,k,n,block_m,block_n,block_k,threads,stages,runs,p10_ms,p50_ms,"
               "p90_ms,wall_p50_ms,gflops,max_abs,max_rel,rel_l2\n");
-  std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%.9f,%.9f,%.9f,%.9f,"
+  std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.9f,%.9f,%.9f,%.9f,"
               "%.3f,%.9g,%.9g,%.9g\n",
-              name, lowering, M, K, N, blockM, blockN, runs,
+              name, lowering, M, K, N, contractionBlockM, contractionBlockN,
+              contractionBlockK, contractionThreads, contractionStages, runs,
               compiledStats.first.p10, compiledStats.first.p50,
               compiledStats.first.p90, compiledStats.second.p50,
               gflops(compiledStats.first.p50), maxAbsError, maxRelError,
               relativeL2);
-  std::printf("result,%s,%s,%d,%d,%d,0,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0\n",
+  std::printf("result,%s,%s,%d,%d,%d,0,0,0,0,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0\n",
               name, tf32Mode ? "cublas-tf32" : "cublas-pedantic-fp32", M, K,
               N, runs, cublasStats.first.p10, cublasStats.first.p50,
               cublasStats.first.p90, cublasStats.second.p50,
