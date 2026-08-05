@@ -18,6 +18,7 @@ add_mlir_library(ConvertMatMulToBlas
     MLIRLinalgDialect
     MLIRLinalgTransforms
     MLIRMemRefDialect
+    MLIRNVGPUDialect
     MLIRPass
     MLIRSCFDialect
     MLIRTensorDialect

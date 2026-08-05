@@ -10,9 +10,11 @@ func.func @shared_matmul(%lhs: memref<65x17xf32>,
 
 // CHECK-LABEL: func.func @shared_matmul
 // CHECK: gpu.launch blocks{{.*}} threads{{.*}} workgroup(%[[A:.*]] : memref<64x16xf32, #gpu.address_space<workgroup>>, %[[B:.*]] : memref<16x64xf32, #gpu.address_space<workgroup>>)
-// CHECK: scf.for
+// CHECK: vector.load {{.*}} : memref<65x17xf32>, vector<4xf32>
+// CHECK: vector.store {{.*}}, %[[A]]{{.*}} : memref<64x16xf32, #gpu.address_space<workgroup>>, vector<4xf32>
 // CHECK: memref.store {{.*}}, %[[A]]
-// CHECK: scf.for
+// CHECK: vector.load {{.*}} : memref<17x67xf32>, vector<4xf32>
+// CHECK: vector.store {{.*}}, %[[B]]{{.*}} : memref<16x64xf32, #gpu.address_space<workgroup>>, vector<4xf32>
 // CHECK: memref.store {{.*}}, %[[B]]
 // CHECK: gpu.barrier
 // CHECK: scf.for

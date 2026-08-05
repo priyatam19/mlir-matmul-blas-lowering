@@ -6,6 +6,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/NVGPU/IR/NVGPUDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/Pass.h"
@@ -38,7 +39,8 @@ struct LowerContractionToGpuPass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
                     linalg::LinalgDialect, memref::MemRefDialect,
-                    scf::SCFDialect, vector::VectorDialect>();
+                    nvgpu::NVGPUDialect, scf::SCFDialect,
+                    vector::VectorDialect>();
   }
 
   Option<std::string> strategy{

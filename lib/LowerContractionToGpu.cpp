@@ -89,61 +89,205 @@ void guardedStore(OpBuilder &builder, Location loc, Value value, Value target,
   builder.setInsertionPointAfter(ifOp);
 }
 
+void emitVectorizedTileLoad(OpBuilder &builder, Location loc, Value source,
+                            Value shared, Value globalRow, Value globalColumn,
+                            Value localRow, Value localColumn, Value rowLimit,
+                            Value columnLimit, Value zeroFloat,
+                            int64_t vectorWidth) {
+  Value lastLane = indexConstant(builder, loc, vectorWidth - 1);
+  Value vectorEnd =
+      arith::AddIOp::create(builder, loc, globalColumn, lastLane);
+  Value fullVector = inBounds2D(builder, loc, globalRow, rowLimit, vectorEnd,
+                                columnLimit);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange(), fullVector,
+                                /*withElseRegion=*/true);
+  ifOp.getThenRegion().front().getTerminator()->erase();
+  ifOp.getElseRegion().front().getTerminator()->erase();
+
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  auto vectorType = VectorType::get({vectorWidth}, builder.getF32Type());
+  Value loaded = vector::LoadOp::create(
+      builder, loc, vectorType, source, ValueRange{globalRow, globalColumn});
+  vector::StoreOp::create(builder, loc, loaded, shared,
+                          ValueRange{localRow, localColumn});
+  scf::YieldOp::create(builder, loc);
+
+  builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+  for (int64_t lane = 0; lane < vectorWidth; ++lane) {
+    Value laneValue = indexConstant(builder, loc, lane);
+    Value sourceColumn =
+        arith::AddIOp::create(builder, loc, globalColumn, laneValue);
+    Value destinationColumn =
+        arith::AddIOp::create(builder, loc, localColumn, laneValue);
+    Value condition = inBounds2D(builder, loc, globalRow, rowLimit,
+                                 sourceColumn, columnLimit);
+    Value scalar = guardedLoad(builder, loc, source,
+                               ValueRange{globalRow, sourceColumn}, condition,
+                               zeroFloat);
+    memref::StoreOp::create(builder, loc, scalar, shared,
+                            ValueRange{localRow, destinationColumn});
+  }
+  scf::YieldOp::create(builder, loc);
+  builder.setInsertionPointAfter(ifOp);
+}
+
 void emitCooperativeTileLoads(OpBuilder &builder, Location loc, Value lhs,
                               Value rhs, Value sharedA, Value sharedB,
                               Value blockRow, Value blockColumn, Value kBase,
                               Value threadId, Value mSize, Value nSize,
                               Value kSize, Value zeroFloat,
                               const KernelConfig &config) {
-  Value threadsValue = indexConstant(builder, loc, config.threads);
-  Value totalA = indexConstant(builder, loc, config.blockM * config.blockK);
-  Value totalB = indexConstant(builder, loc, config.blockK * config.blockN);
   Value blockKValue = indexConstant(builder, loc, config.blockK);
   Value blockNValue = indexConstant(builder, loc, config.blockN);
+  Value vectorWidthValue = indexConstant(builder, loc, config.vectorWidth);
 
-  scf::ForOp::create(
-      builder, loc, threadId, totalA, threadsValue, ValueRange{},
-      [&](OpBuilder &loadBuilder, Location loadLoc, Value linear,
-          ValueRange) {
-        Value localRow = arith::DivUIOp::create(loadBuilder, loadLoc, linear,
-                                                blockKValue);
-        Value localK = arith::RemUIOp::create(loadBuilder, loadLoc, linear,
-                                              blockKValue);
-        Value globalRow = arith::AddIOp::create(loadBuilder, loadLoc, blockRow,
-                                                localRow);
-        Value globalK = arith::AddIOp::create(loadBuilder, loadLoc, kBase,
-                                              localK);
-        Value condition = inBounds2D(loadBuilder, loadLoc, globalRow, mSize,
-                                     globalK, kSize);
-        Value loaded = guardedLoad(loadBuilder, loadLoc, lhs,
-                                   ValueRange{globalRow, globalK}, condition,
-                                   zeroFloat);
-        memref::StoreOp::create(loadBuilder, loadLoc, loaded, sharedA,
-                                ValueRange{localRow, localK});
-        scf::YieldOp::create(loadBuilder, loadLoc);
-      });
+  int64_t aVectors =
+      config.blockM * config.blockK / config.vectorWidth;
+  int64_t bVectors =
+      config.blockK * config.blockN / config.vectorWidth;
+  int64_t aCopiesPerThread = aVectors / config.threads;
+  int64_t bCopiesPerThread = bVectors / config.threads;
 
-  scf::ForOp::create(
-      builder, loc, threadId, totalB, threadsValue, ValueRange{},
-      [&](OpBuilder &loadBuilder, Location loadLoc, Value linear,
-          ValueRange) {
-        Value localK = arith::DivUIOp::create(loadBuilder, loadLoc, linear,
-                                              blockNValue);
-        Value localColumn = arith::RemUIOp::create(
-            loadBuilder, loadLoc, linear, blockNValue);
-        Value globalK = arith::AddIOp::create(loadBuilder, loadLoc, kBase,
-                                              localK);
-        Value globalColumn = arith::AddIOp::create(
-            loadBuilder, loadLoc, blockColumn, localColumn);
-        Value condition = inBounds2D(loadBuilder, loadLoc, globalK, kSize,
-                                     globalColumn, nSize);
-        Value loaded = guardedLoad(loadBuilder, loadLoc, rhs,
-                                   ValueRange{globalK, globalColumn}, condition,
-                                   zeroFloat);
-        memref::StoreOp::create(loadBuilder, loadLoc, loaded, sharedB,
-                                ValueRange{localK, localColumn});
-        scf::YieldOp::create(loadBuilder, loadLoc);
-      });
+  for (int64_t copy = 0; copy < aCopiesPerThread; ++copy) {
+    Value vectorIndex = arith::AddIOp::create(
+        builder, loc, threadId,
+        indexConstant(builder, loc, copy * config.threads));
+    Value linear =
+        arith::MulIOp::create(builder, loc, vectorIndex, vectorWidthValue);
+    Value localRow =
+        arith::DivUIOp::create(builder, loc, linear, blockKValue);
+    Value localK = arith::RemUIOp::create(builder, loc, linear, blockKValue);
+    Value globalRow =
+        arith::AddIOp::create(builder, loc, blockRow, localRow);
+    Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
+    emitVectorizedTileLoad(builder, loc, lhs, sharedA, globalRow, globalK,
+                           localRow, localK, mSize, kSize, zeroFloat,
+                           config.vectorWidth);
+  }
+
+  for (int64_t copy = 0; copy < bCopiesPerThread; ++copy) {
+    Value vectorIndex = arith::AddIOp::create(
+        builder, loc, threadId,
+        indexConstant(builder, loc, copy * config.threads));
+    Value linear =
+        arith::MulIOp::create(builder, loc, vectorIndex, vectorWidthValue);
+    Value localK =
+        arith::DivUIOp::create(builder, loc, linear, blockNValue);
+    Value localColumn =
+        arith::RemUIOp::create(builder, loc, linear, blockNValue);
+    Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
+    Value globalColumn =
+        arith::AddIOp::create(builder, loc, blockColumn, localColumn);
+    emitVectorizedTileLoad(builder, loc, rhs, sharedB, globalK, globalColumn,
+                           localK, localColumn, kSize, nSize, zeroFloat,
+                           config.vectorWidth);
+  }
+}
+
+Value availableVectorElements(OpBuilder &builder, Location loc, Value row,
+                              Value rowLimit, Value column,
+                              Value columnLimit, int64_t vectorWidth) {
+  Value rowOk = arith::CmpIOp::create(builder, loc,
+                                      arith::CmpIPredicate::ult, row, rowLimit);
+  Value columnOk = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::ult, column, columnLimit);
+  Value anyAvailable = andValues(builder, loc, rowOk, columnOk);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{builder.getIndexType()},
+                                anyAvailable, /*withElseRegion=*/true);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  Value remaining =
+      arith::SubIOp::create(builder, loc, columnLimit, column);
+  Value available = arith::MinUIOp::create(
+      builder, loc, remaining, indexConstant(builder, loc, vectorWidth));
+  scf::YieldOp::create(builder, loc, available);
+  builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+  scf::YieldOp::create(builder, loc, indexConstant(builder, loc, 0));
+  builder.setInsertionPointAfter(ifOp);
+  return ifOp.getResult(0);
+}
+
+Value emitAsyncVectorCopy(OpBuilder &builder, Location loc, Value source,
+                          Value shared, Value stage, Value globalRow,
+                          Value globalColumn, Value localRow, Value localColumn,
+                          Value rowLimit, Value columnLimit,
+                          int64_t vectorWidth) {
+  Value rowOk = arith::CmpIOp::create(builder, loc,
+                                      arith::CmpIPredicate::ult, globalRow,
+                                      rowLimit);
+  Value columnOk = arith::CmpIOp::create(builder, loc,
+                                         arith::CmpIPredicate::ult,
+                                         globalColumn, columnLimit);
+  Value safeRow = arith::SelectOp::create(
+      builder, loc, rowOk, globalRow, indexConstant(builder, loc, 0));
+  Value safeColumn = arith::SelectOp::create(
+      builder, loc, columnOk, globalColumn, indexConstant(builder, loc, 0));
+  Value sourceElements = availableVectorElements(
+      builder, loc, globalRow, rowLimit, globalColumn, columnLimit,
+      vectorWidth);
+  auto tokenType = nvgpu::DeviceAsyncTokenType::get(builder.getContext());
+  return nvgpu::DeviceAsyncCopyOp::create(
+      builder, loc, tokenType, shared,
+      ValueRange{stage, localRow, localColumn}, source,
+      ValueRange{safeRow, safeColumn}, builder.getIndexAttr(vectorWidth),
+      sourceElements,
+      vectorWidth == 4 ? builder.getUnitAttr() : UnitAttr());
+}
+
+Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
+                         Value rhs, Value sharedA, Value sharedB,
+                         Value stage, Value blockRow, Value blockColumn,
+                         Value kBase, Value threadId, Value mSize, Value nSize,
+                         Value kSize, const KernelConfig &config) {
+  Value blockKValue = indexConstant(builder, loc, config.blockK);
+  Value blockNValue = indexConstant(builder, loc, config.blockN);
+  Value vectorWidthValue = indexConstant(builder, loc, config.vectorWidth);
+  int64_t aVectors =
+      config.blockM * config.blockK / config.vectorWidth;
+  int64_t bVectors =
+      config.blockK * config.blockN / config.vectorWidth;
+  int64_t aCopiesPerThread = aVectors / config.threads;
+  int64_t bCopiesPerThread = bVectors / config.threads;
+  SmallVector<Value> tokens;
+  tokens.reserve(aCopiesPerThread + bCopiesPerThread);
+
+  for (int64_t copy = 0; copy < aCopiesPerThread; ++copy) {
+    Value vectorIndex = arith::AddIOp::create(
+        builder, loc, threadId,
+        indexConstant(builder, loc, copy * config.threads));
+    Value linear =
+        arith::MulIOp::create(builder, loc, vectorIndex, vectorWidthValue);
+    Value localRow =
+        arith::DivUIOp::create(builder, loc, linear, blockKValue);
+    Value localK = arith::RemUIOp::create(builder, loc, linear, blockKValue);
+    Value globalRow =
+        arith::AddIOp::create(builder, loc, blockRow, localRow);
+    Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
+    tokens.push_back(emitAsyncVectorCopy(
+        builder, loc, lhs, sharedA, stage, globalRow, globalK, localRow,
+        localK, mSize, kSize, config.vectorWidth));
+  }
+
+  for (int64_t copy = 0; copy < bCopiesPerThread; ++copy) {
+    Value vectorIndex = arith::AddIOp::create(
+        builder, loc, threadId,
+        indexConstant(builder, loc, copy * config.threads));
+    Value linear =
+        arith::MulIOp::create(builder, loc, vectorIndex, vectorWidthValue);
+    Value localK =
+        arith::DivUIOp::create(builder, loc, linear, blockNValue);
+    Value localColumn =
+        arith::RemUIOp::create(builder, loc, linear, blockNValue);
+    Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
+    Value globalColumn =
+        arith::AddIOp::create(builder, loc, blockColumn, localColumn);
+    tokens.push_back(emitAsyncVectorCopy(
+        builder, loc, rhs, sharedB, stage, globalK, globalColumn, localK,
+        localColumn, kSize, nSize, config.vectorWidth));
+  }
+
+  return nvgpu::DeviceAsyncCreateGroupOp::create(
+      builder, loc, nvgpu::DeviceAsyncTokenType::get(builder.getContext()),
+      tokens);
 }
 
 void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
@@ -168,12 +312,19 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
   auto workgroupSpace =
       gpu::AddressSpaceAttr::get(rewriter.getContext(),
                                  gpu::AddressSpace::Workgroup);
-  auto sharedAType = MemRefType::get({config.blockM, config.blockK},
-                                     rewriter.getF32Type(),
+  SmallVector<int64_t> sharedAShape;
+  SmallVector<int64_t> sharedBShape;
+  if (config.stages == 2) {
+    sharedAShape = {2, config.blockM, config.blockK};
+    sharedBShape = {2, config.blockK, config.blockN};
+  } else {
+    sharedAShape = {config.blockM, config.blockK};
+    sharedBShape = {config.blockK, config.blockN};
+  }
+  auto sharedAType = MemRefType::get(sharedAShape, rewriter.getF32Type(),
                                      MemRefLayoutAttrInterface{},
                                      workgroupSpace);
-  auto sharedBType = MemRefType::get({config.blockK, config.blockN},
-                                     rewriter.getF32Type(),
+  auto sharedBType = MemRefType::get(sharedBShape, rewriter.getF32Type(),
                                      MemRefLayoutAttrInterface{},
                                      workgroupSpace);
   SmallVector<Type> workgroupTypes{sharedAType, sharedBType};
@@ -233,15 +384,42 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
     }
   }
 
+  if (config.stages == 2) {
+    Value initialGroup = emitAsyncTileLoads(
+        rewriter, loc, lhs, rhs, sharedA, sharedB, zero, blockRow, blockColumn,
+        zero, threadId, mSize, nSize, kSize, config);
+    nvgpu::DeviceAsyncWaitOp::create(rewriter, loc, initialGroup, nullptr);
+    gpu::BarrierOp::create(rewriter, loc, gpu::AddressSpace::Workgroup);
+  }
+
   auto kTiles = scf::ForOp::create(
       rewriter, loc, zero, kSize, blockKValue, accumulators,
       [&](OpBuilder &tileBuilder, Location tileLoc, Value kBase,
           ValueRange tileAccumulators) {
-        emitCooperativeTileLoads(tileBuilder, tileLoc, lhs, rhs, sharedA,
-                                 sharedB, blockRow, blockColumn, kBase, threadId,
-                                 mSize, nSize, kSize, zeroFloat, config);
-        gpu::BarrierOp::create(tileBuilder, tileLoc,
-                               gpu::AddressSpace::Workgroup);
+        Value currentStage = zero;
+        Value nextGroup;
+        if (config.stages == 2) {
+          Value tileNumber = arith::DivUIOp::create(
+              tileBuilder, tileLoc, kBase, blockKValue);
+          currentStage = arith::RemUIOp::create(
+              tileBuilder, tileLoc, tileNumber,
+              indexConstant(tileBuilder, tileLoc, 2));
+          Value nextStage = arith::SubIOp::create(
+              tileBuilder, tileLoc, one, currentStage);
+          Value nextK = arith::AddIOp::create(tileBuilder, tileLoc, kBase,
+                                              blockKValue);
+          nextGroup = emitAsyncTileLoads(
+              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, nextStage,
+              blockRow, blockColumn, nextK, threadId, mSize, nSize, kSize,
+              config);
+        } else {
+          emitCooperativeTileLoads(tileBuilder, tileLoc, lhs, rhs, sharedA,
+                                   sharedB, blockRow, blockColumn, kBase,
+                                   threadId, mSize, nSize, kSize, zeroFloat,
+                                   config);
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+        }
 
         auto reduction = scf::ForOp::create(
             tileBuilder, tileLoc, zero, blockKValue, one, tileAccumulators,
@@ -252,17 +430,23 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
               for (int64_t row = 0; row < microRows; ++row) {
                 Value localRow = arith::SubIOp::create(
                     reductionBuilder, reductionLoc, rows[row], blockRow);
+                SmallVector<Value> indices;
+                if (config.stages == 2)
+                  indices.push_back(currentStage);
+                indices.append({localRow, localK});
                 lhsValues.push_back(memref::LoadOp::create(
-                    reductionBuilder, reductionLoc, sharedA,
-                    ValueRange{localRow, localK}));
+                    reductionBuilder, reductionLoc, sharedA, indices));
               }
               for (int64_t column = 0; column < microColumns; ++column) {
                 Value localColumn = arith::SubIOp::create(
                     reductionBuilder, reductionLoc, columns[column],
                     blockColumn);
+                SmallVector<Value> indices;
+                if (config.stages == 2)
+                  indices.push_back(currentStage);
+                indices.append({localK, localColumn});
                 rhsValues.push_back(memref::LoadOp::create(
-                    reductionBuilder, reductionLoc, sharedB,
-                    ValueRange{localK, localColumn}));
+                    reductionBuilder, reductionLoc, sharedB, indices));
               }
 
               SmallVector<Value> next;
@@ -278,6 +462,9 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
               }
               scf::YieldOp::create(reductionBuilder, reductionLoc, next);
             });
+        if (config.stages == 2)
+          nvgpu::DeviceAsyncWaitOp::create(tileBuilder, tileLoc, nextGroup,
+                                           nullptr);
         gpu::BarrierOp::create(tileBuilder, tileLoc,
                                gpu::AddressSpace::Workgroup);
         scf::YieldOp::create(tileBuilder, tileLoc, reduction.getResults());
@@ -311,6 +498,15 @@ void LowerContractionToGpuPass::runOnOperation() {
       config.threads < 128 || config.threads > 512 ||
       config.threads % 32 != 0 || config.blockN % 32 != 0 ||
       config.blockM % (config.threads / 32) != 0 || config.vectorWidth <= 0 ||
+      config.blockK % config.vectorWidth != 0 ||
+      config.blockN % config.vectorWidth != 0 ||
+      (config.blockM * config.blockK) %
+              (config.vectorWidth * config.threads) !=
+          0 ||
+      (config.blockK * config.blockN) %
+              (config.vectorWidth * config.threads) !=
+          0 ||
+      (config.stages == 2 && config.vectorWidth != 4) ||
       config.stages <= 0 || config.stages > 2) {
     getOperation().emitError()
         << "invalid GPU contraction configuration: block=" << config.blockM
