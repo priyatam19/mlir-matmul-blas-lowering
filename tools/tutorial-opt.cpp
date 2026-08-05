@@ -1,6 +1,7 @@
 #include "lib/ConvertBatchMatMulToCublas.h"
 #include "lib/ConvertConv2DNchwToCudnn.h"
 #include "lib/ConvertMatMulToBlas.h"
+#include "lib/LowerContractionToGpu.h"
 #include "lib/TileBatchMatMulForGpu.h"
 #include "lib/TileConv2DNchwForGpu.h"
 #include "lib/TileMatMulForCache.h"
@@ -29,6 +30,10 @@
 
 std::unique_ptr<mlir::Pass> createConvertMatmulToBlasLibraryCallPass() {
   return std::make_unique<mlir::tutorial::ConvertMatmulToBlasLibraryCallPass>();
+}
+
+std::unique_ptr<mlir::Pass> createLowerContractionToGpuPass() {
+  return std::make_unique<mlir::tutorial::LowerContractionToGpuPass>();
 }
 
 std::unique_ptr<mlir::Pass> createConvertBatchMatMulToCublasPass() {
@@ -107,6 +112,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
 
   mlir::PassRegistration<mlir::tutorial::ConvertMatmulToBlasLibraryCallPass>();
+  mlir::PassRegistration<mlir::tutorial::LowerContractionToGpuPass>();
   mlir::PassRegistration<mlir::tutorial::ConvertBatchMatMulToCublasPass>();
   mlir::PassRegistration<mlir::tutorial::ConvertConv2DNchwToCudnnPass>();
   mlir::PassRegistration<mlir::tutorial::TileMatMulForCachePass>();
