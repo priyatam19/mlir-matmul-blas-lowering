@@ -1,4 +1,6 @@
+#include "lib/ConvertBatchMatMulToCublas.h"
 #include "lib/ConvertMatMulToBlas.h"
+#include "lib/TileBatchMatMulForGpu.h"
 #include "lib/TileMatMulForCache.h"
 #include "lib/TileMatMulForGpu.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
@@ -27,8 +29,16 @@ std::unique_ptr<mlir::Pass> createConvertMatmulToBlasLibraryCallPass() {
   return std::make_unique<mlir::tutorial::ConvertMatmulToBlasLibraryCallPass>();
 }
 
+std::unique_ptr<mlir::Pass> createConvertBatchMatMulToCublasPass() {
+  return std::make_unique<mlir::tutorial::ConvertBatchMatMulToCublasPass>();
+}
+
 std::unique_ptr<mlir::Pass> createTileMatMulForCachePass() {
   return std::make_unique<mlir::tutorial::TileMatMulForCachePass>();
+}
+
+std::unique_ptr<mlir::Pass> createTileBatchMatMulForGpuPass() {
+  return std::make_unique<mlir::tutorial::TileBatchMatMulForGpuPass>();
 }
 
 std::unique_ptr<mlir::Pass> createTileMatMulForGpuPass() {
@@ -87,7 +97,9 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
 
   mlir::PassRegistration<mlir::tutorial::ConvertMatmulToBlasLibraryCallPass>();
+  mlir::PassRegistration<mlir::tutorial::ConvertBatchMatMulToCublasPass>();
   mlir::PassRegistration<mlir::tutorial::TileMatMulForCachePass>();
+  mlir::PassRegistration<mlir::tutorial::TileBatchMatMulForGpuPass>();
   mlir::PassRegistration<mlir::tutorial::TileMatMulForGpuPass>();
 
   mlir::PassPipelineRegistration<>(

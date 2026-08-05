@@ -16,10 +16,12 @@ BLOCK_N="${BLOCK_N:-32}"
 TILE_M="${TILE_M:-16}"
 TILE_N="${TILE_N:-16}"
 TILE_K="${TILE_K:-256}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}}"
+mkdir -p "${OUTPUT_DIR}"
 
-BUFFERIZED_MLIR="${SCRIPT_DIR}/sample_gpu_bufferized.mlir"
-GPU_DIALECT_MLIR="${SCRIPT_DIR}/sample_gpu_dialect.mlir"
-NVPTX_MLIR="${SCRIPT_DIR}/sample_nvptx_isa.mlir"
+BUFFERIZED_MLIR="${OUTPUT_DIR}/sample_gpu_bufferized.mlir"
+GPU_DIALECT_MLIR="${OUTPUT_DIR}/sample_gpu_dialect.mlir"
+NVPTX_MLIR="${OUTPUT_DIR}/sample_nvptx_isa.mlir"
 
 bufferize_common=(
   --convert-tensor-to-linalg
@@ -57,10 +59,17 @@ case "${GPU_LOWERING}" in
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
         --tile-matmul-for-gpu="block-m=${BLOCK_M} block-n=${BLOCK_N}" \
+        --tile-batch-matmul-for-gpu="block-m=${BLOCK_M} block-n=${BLOCK_N}" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
+  vendor)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --convert-batch-matmul-to-cublas \
         -o "${BUFFERIZED_MLIR}"
     ;;
   *)
-    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, or block-thread." >&2
+    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, block-thread, or vendor." >&2
     exit 2
     ;;
 esac
@@ -96,7 +105,7 @@ mlir-opt "${GPU_DIALECT_MLIR}" \
   --gpu-module-to-binary \
   -o "${NVPTX_MLIR}"
 
-mlir-translate -mlir-to-llvmir "${NVPTX_MLIR}" -o "${SCRIPT_DIR}/sample.ll"
-llc -filetype=obj -O3 "${SCRIPT_DIR}/sample.ll" -o "${SCRIPT_DIR}/sample.o"
+mlir-translate -mlir-to-llvmir "${NVPTX_MLIR}" -o "${OUTPUT_DIR}/sample.ll"
+llc -filetype=obj -O3 "${OUTPUT_DIR}/sample.ll" -o "${OUTPUT_DIR}/sample.o"
 
-echo "Generated ${SCRIPT_DIR}/sample.o with GPU_LOWERING=${GPU_LOWERING}."
+echo "Generated ${OUTPUT_DIR}/sample.o with GPU_LOWERING=${GPU_LOWERING}."
