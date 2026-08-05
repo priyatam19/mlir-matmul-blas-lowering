@@ -68,6 +68,10 @@ Cold convergence must be reported separately. Formal timings use a populated
 cache. On a read-only cache miss, tuning-disabled run, or short-lived process,
 candidate zero is an architecture-profile shared-memory or tensor-core default;
 the portable block/thread implementation remains the final FP32 candidate.
+For GEMM/BMM, offline `ptxas` inspection selects `64x128x16`, 256 threads as
+the initial default: synchronous for strict FP32 and two-stage asynchronous for
+TF32. The TF32 default was the tested candidate with zero spill loads/stores;
+spill-heavy schedules remain measurable so runtime latency can reject them.
 
 ## Offline Verification
 
