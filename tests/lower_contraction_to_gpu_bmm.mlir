@@ -14,7 +14,7 @@ func.func @batch_matmul(%lhs: memref<?x65x17xf32>,
 // SHARED: %[[BATCH:.*]] = memref.dim %{{.*}}, %c0
 // SHARED: gpu.launch blocks{{.*}}%[[BATCH]]) threads
 // SHARED: nvgpu.device_async_copy {{.*}} : memref<?x65x17xf32> to memref<2x64x16xf32, #gpu.address_space<workgroup>>
-// SHARED: nvgpu.device_async_copy {{.*}} : memref<?x17x67xf32> to memref<2x16x64xf32, #gpu.address_space<workgroup>>
+// SHARED: nvgpu.device_async_copy {{.*}} : memref<?x17x67xf32> to memref<2x16x65xf32, #gpu.address_space<workgroup>>
 // SHARED: nvgpu.device_async_wait
 // SHARED: memref.store {{.*}} : memref<?x65x67xf32>
 // SHARED-NOT: linalg.batch_matmul

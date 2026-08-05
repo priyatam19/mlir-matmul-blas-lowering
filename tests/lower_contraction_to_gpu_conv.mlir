@@ -13,10 +13,12 @@ func.func @implicit_gemm_conv(%input: memref<?x?x?x?xf32>,
 }
 
 // SHARED-LABEL: func.func @implicit_gemm_conv
-// SHARED: gpu.launch {{.*}} workgroup(%[[FILTER:.*]] : memref<64x16xf32, #gpu.address_space<workgroup>>, %[[PATCH:.*]] : memref<16x64xf32, #gpu.address_space<workgroup>>)
+// SHARED: gpu.launch {{.*}} workgroup(%[[FILTER:.*]] : memref<64x16xf32, #gpu.address_space<workgroup>>, %[[PATCH:.*]] : memref<16x65xf32, #gpu.address_space<workgroup>>)
 // SHARED: memref.load {{.*}} : memref<?x?x?x?xf32>
 // SHARED: memref.store {{.*}}, %[[FILTER]]
 // SHARED: arith.muli
+// SHARED: vector.load {{.*}} : memref<?x?x?x?xf32>, vector<4xf32>
+// SHARED: vector.store {{.*}}, %[[PATCH]]
 // SHARED: memref.load {{.*}} : memref<?x?x?x?xf32>
 // SHARED: memref.store {{.*}}, %[[PATCH]]
 // SHARED: gpu.barrier

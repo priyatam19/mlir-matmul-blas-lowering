@@ -10,7 +10,7 @@ func.func @tf32_matmul(%lhs: memref<65x17xf32>,
 }
 
 // CHECK-LABEL: func.func @tf32_matmul
-// CHECK: gpu.launch {{.*}} workgroup(%[[A:.*]] : memref<64x16xf32, #gpu.address_space<workgroup>>, %[[B:.*]] : memref<16x64xf32, #gpu.address_space<workgroup>>)
+// CHECK: gpu.launch {{.*}} workgroup(%[[A:.*]] : memref<64x16xf32, #gpu.address_space<workgroup>>, %[[B:.*]] : memref<16x65xf32, #gpu.address_space<workgroup>>)
 // CHECK: vector.load
 // CHECK: vector.store
 // CHECK: gpu.barrier
@@ -25,7 +25,7 @@ func.func @tf32_matmul(%lhs: memref<65x17xf32>,
 // CHECK-NOT: linalg.matmul
 
 // ASYNC-LABEL: func.func @tf32_matmul
-// ASYNC: gpu.launch {{.*}} workgroup(%[[A2:.*]] : memref<2x64x16xf32, #gpu.address_space<workgroup>>, %[[B2:.*]] : memref<2x16x64xf32, #gpu.address_space<workgroup>>)
+// ASYNC: gpu.launch {{.*}} workgroup(%[[A2:.*]] : memref<2x64x16xf32, #gpu.address_space<workgroup>>, %[[B2:.*]] : memref<2x16x65xf32, #gpu.address_space<workgroup>>)
 // ASYNC: nvgpu.device_async_copy {{.*}}, %[[A2]]
 // ASYNC: nvgpu.device_async_copy {{.*}}, %[[B2]]
 // ASYNC: nvgpu.device_async_create_group

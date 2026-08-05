@@ -19,6 +19,12 @@ struct KernelConfig {
   int64_t stages;
 };
 
+int64_t sharedBColumns(const KernelConfig &config) {
+  // Padding rotates K rows across banks; 32-wide K tiles retain the exact
+  // 48 KiB two-stage profile budget.
+  return config.blockN + (config.blockK == 16 ? 1 : 0);
+}
+
 bool isContiguousF32Matrix(Value value) {
   auto type = dyn_cast<MemRefType>(value.getType());
   if (!type || type.getRank() != 2 || !type.getElementType().isF32())
@@ -369,7 +375,8 @@ void emitConvolutionTileLoads(
     Value kBase, Value threadId, Value fSize, Value cSize, Value ihSize,
     Value iwSize, Value ohSize, Value owSize, Value khSize, Value kwSize,
     Value reductionSize, Value strideH, Value strideW, Value dilationH,
-    Value dilationW, Value zeroFloat, const KernelConfig &config) {
+    Value dilationW, Value zeroFloat, bool vectorizeInputWidth,
+    const KernelConfig &config) {
   Value threadsValue = indexConstant(builder, loc, config.threads);
   Value totalA = indexConstant(builder, loc, config.blockM * config.blockK);
   Value totalB = indexConstant(builder, loc, config.blockK * config.blockN);
@@ -405,61 +412,128 @@ void emitConvolutionTileLoads(
         scf::YieldOp::create(loadBuilder, loadLoc);
       });
 
-  Value positionSize =
-      arith::MulIOp::create(builder, loc, ohSize, owSize);
-  scf::ForOp::create(
-      builder, loc, threadId, totalB, threadsValue, ValueRange{},
-      [&](OpBuilder &loadBuilder, Location loadLoc, Value linear, ValueRange) {
-        Value localK = arith::DivUIOp::create(loadBuilder, loadLoc, linear,
-                                              blockNValue);
-        Value localPosition = arith::RemUIOp::create(
-            loadBuilder, loadLoc, linear, blockNValue);
-        Value globalK =
-            arith::AddIOp::create(loadBuilder, loadLoc, kBase, localK);
-        Value globalPosition = arith::AddIOp::create(
-            loadBuilder, loadLoc, blockPosition, localPosition);
-        Value kw = arith::RemUIOp::create(loadBuilder, loadLoc, globalK,
-                                          kwSize);
-        Value quotient = arith::DivUIOp::create(loadBuilder, loadLoc, globalK,
-                                                kwSize);
-        Value kh = arith::RemUIOp::create(loadBuilder, loadLoc, quotient,
-                                          khSize);
-        Value channel = arith::DivUIOp::create(loadBuilder, loadLoc, quotient,
-                                               khSize);
-        Value ow = arith::RemUIOp::create(loadBuilder, loadLoc, globalPosition,
-                                          owSize);
-        Value oh = arith::DivUIOp::create(loadBuilder, loadLoc, globalPosition,
-                                          owSize);
-        Value inputH = arith::MulIOp::create(loadBuilder, loadLoc, oh, strideH);
-        inputH = arith::AddIOp::create(
-            loadBuilder, loadLoc, inputH,
-            arith::MulIOp::create(loadBuilder, loadLoc, kh, dilationH));
-        Value inputW = arith::MulIOp::create(loadBuilder, loadLoc, ow, strideW);
-        inputW = arith::AddIOp::create(
-            loadBuilder, loadLoc, inputW,
-            arith::MulIOp::create(loadBuilder, loadLoc, kw, dilationW));
-        Value kOk = arith::CmpIOp::create(loadBuilder, loadLoc,
-                                          arith::CmpIPredicate::ult, globalK,
-                                          reductionSize);
-        Value positionOk = arith::CmpIOp::create(
-            loadBuilder, loadLoc, arith::CmpIPredicate::ult, globalPosition,
-            positionSize);
-        Value hOk = arith::CmpIOp::create(loadBuilder, loadLoc,
-                                          arith::CmpIPredicate::ult, inputH,
-                                          ihSize);
-        Value wOk = arith::CmpIOp::create(loadBuilder, loadLoc,
-                                          arith::CmpIPredicate::ult, inputW,
-                                          iwSize);
-        Value condition = andValues(loadBuilder, loadLoc, kOk, positionOk);
-        condition = andValues(loadBuilder, loadLoc, condition, hOk);
-        condition = andValues(loadBuilder, loadLoc, condition, wOk);
-        Value loaded = guardedLoad(
-            loadBuilder, loadLoc, input,
-            ValueRange{batch, channel, inputH, inputW}, condition, zeroFloat);
-        memref::StoreOp::create(loadBuilder, loadLoc, loaded, sharedB,
-                                ValueRange{localK, localPosition});
-        scf::YieldOp::create(loadBuilder, loadLoc);
-      });
+  Value positionSize = arith::MulIOp::create(builder, loc, ohSize, owSize);
+  int64_t bVectors =
+      config.blockK * config.blockN / config.vectorWidth;
+  int64_t copiesPerThread = bVectors / config.threads;
+  Value vectorWidth = indexConstant(builder, loc, config.vectorWidth);
+  for (int64_t copy = 0; copy < copiesPerThread; ++copy) {
+    Value vectorIndex = arith::AddIOp::create(
+        builder, loc, threadId,
+        indexConstant(builder, loc, copy * config.threads));
+    Value linear = arith::MulIOp::create(builder, loc, vectorIndex,
+                                         vectorWidth);
+    Value localK =
+        arith::DivUIOp::create(builder, loc, linear, blockNValue);
+    Value localPosition =
+        arith::RemUIOp::create(builder, loc, linear, blockNValue);
+    Value globalK = arith::AddIOp::create(builder, loc, kBase, localK);
+    Value globalPosition = arith::AddIOp::create(
+        builder, loc, blockPosition, localPosition);
+    Value kw = arith::RemUIOp::create(builder, loc, globalK, kwSize);
+    Value quotient = arith::DivUIOp::create(builder, loc, globalK, kwSize);
+    Value kh = arith::RemUIOp::create(builder, loc, quotient, khSize);
+    Value channel = arith::DivUIOp::create(builder, loc, quotient, khSize);
+    Value ow = arith::RemUIOp::create(builder, loc, globalPosition, owSize);
+    Value oh = arith::DivUIOp::create(builder, loc, globalPosition, owSize);
+    Value inputH = arith::MulIOp::create(builder, loc, oh, strideH);
+    inputH = arith::AddIOp::create(
+        builder, loc, inputH,
+        arith::MulIOp::create(builder, loc, kh, dilationH));
+    Value inputW = arith::MulIOp::create(builder, loc, ow, strideW);
+    inputW = arith::AddIOp::create(
+        builder, loc, inputW,
+        arith::MulIOp::create(builder, loc, kw, dilationW));
+    Value kOk = arith::CmpIOp::create(builder, loc,
+                                      arith::CmpIPredicate::ult, globalK,
+                                      reductionSize);
+    Value vectorEnd = arith::AddIOp::create(
+        builder, loc, globalPosition,
+        indexConstant(builder, loc, config.vectorWidth - 1));
+    Value positionOk = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::ult, vectorEnd, positionSize);
+    Value owEnd = arith::AddIOp::create(
+        builder, loc, ow,
+        indexConstant(builder, loc, config.vectorWidth - 1));
+    Value sameRow = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::ult, owEnd, owSize);
+    Value inputWEnd = arith::AddIOp::create(
+        builder, loc, inputW,
+        indexConstant(builder, loc, config.vectorWidth - 1));
+    Value hOk = arith::CmpIOp::create(builder, loc,
+                                      arith::CmpIPredicate::ult, inputH,
+                                      ihSize);
+    Value wOk = arith::CmpIOp::create(builder, loc,
+                                      arith::CmpIPredicate::ult, inputWEnd,
+                                      iwSize);
+    Value alignment = arith::RemUIOp::create(builder, loc, inputW,
+                                             vectorWidth);
+    Value aligned = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::eq, alignment,
+        indexConstant(builder, loc, 0));
+    Value fullVector = andValues(builder, loc, kOk, positionOk);
+    fullVector = andValues(builder, loc, fullVector, sameRow);
+    fullVector = andValues(builder, loc, fullVector, hOk);
+    fullVector = andValues(builder, loc, fullVector, wOk);
+    fullVector = andValues(builder, loc, fullVector, aligned);
+    if (!vectorizeInputWidth)
+      fullVector = arith::ConstantIntOp::create(builder, loc, 0, 1);
+
+    auto ifOp = scf::IfOp::create(builder, loc, TypeRange(), fullVector,
+                                  /*withElseRegion=*/true);
+    ifOp.getThenRegion().front().getTerminator()->erase();
+    ifOp.getElseRegion().front().getTerminator()->erase();
+    builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    auto vectorType =
+        VectorType::get({config.vectorWidth}, builder.getF32Type());
+    Value loaded = vector::LoadOp::create(
+        builder, loc, vectorType, input,
+        ValueRange{batch, channel, inputH, inputW});
+    vector::StoreOp::create(builder, loc, loaded, sharedB,
+                            ValueRange{localK, localPosition});
+    scf::YieldOp::create(builder, loc);
+
+    builder.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    for (int64_t lane = 0; lane < config.vectorWidth; ++lane) {
+      Value laneValue = indexConstant(builder, loc, lane);
+      Value lanePosition =
+          arith::AddIOp::create(builder, loc, globalPosition, laneValue);
+      Value laneOw =
+          arith::RemUIOp::create(builder, loc, lanePosition, owSize);
+      Value laneOh =
+          arith::DivUIOp::create(builder, loc, lanePosition, owSize);
+      Value laneInputH =
+          arith::MulIOp::create(builder, loc, laneOh, strideH);
+      laneInputH = arith::AddIOp::create(
+          builder, loc, laneInputH,
+          arith::MulIOp::create(builder, loc, kh, dilationH));
+      Value laneInputW =
+          arith::MulIOp::create(builder, loc, laneOw, strideW);
+      laneInputW = arith::AddIOp::create(
+          builder, loc, laneInputW,
+          arith::MulIOp::create(builder, loc, kw, dilationW));
+      Value lanePositionOk = arith::CmpIOp::create(
+          builder, loc, arith::CmpIPredicate::ult, lanePosition,
+          positionSize);
+      Value laneHOk = arith::CmpIOp::create(
+          builder, loc, arith::CmpIPredicate::ult, laneInputH, ihSize);
+      Value laneWOk = arith::CmpIOp::create(
+          builder, loc, arith::CmpIPredicate::ult, laneInputW, iwSize);
+      Value condition = andValues(builder, loc, kOk, lanePositionOk);
+      condition = andValues(builder, loc, condition, laneHOk);
+      condition = andValues(builder, loc, condition, laneWOk);
+      Value scalar = guardedLoad(
+          builder, loc, input,
+          ValueRange{batch, channel, laneInputH, laneInputW}, condition,
+          zeroFloat);
+      Value destination =
+          arith::AddIOp::create(builder, loc, localPosition, laneValue);
+      memref::StoreOp::create(builder, loc, scalar, sharedB,
+                              ValueRange{localK, destination});
+    }
+    scf::YieldOp::create(builder, loc);
+    builder.setInsertionPointAfter(ifOp);
+  }
 }
 
 Value zeroVector(OpBuilder &builder, Location loc, VectorType type) {
@@ -568,7 +642,8 @@ void emitTensorCoreContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
   auto workgroupSpace = gpu::AddressSpaceAttr::get(
       rewriter.getContext(), gpu::AddressSpace::Workgroup);
   SmallVector<int64_t> sharedAShape = {config.blockM, config.blockK};
-  SmallVector<int64_t> sharedBShape = {config.blockK, config.blockN};
+  SmallVector<int64_t> sharedBShape = {config.blockK,
+                                       sharedBColumns(config)};
   if (config.stages == 2) {
     sharedAShape.insert(sharedAShape.begin(), 2);
     sharedBShape.insert(sharedBShape.begin(), 2);
@@ -752,10 +827,10 @@ void emitSharedContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
   SmallVector<int64_t> sharedBShape;
   if (config.stages == 2) {
     sharedAShape = {2, config.blockM, config.blockK};
-    sharedBShape = {2, config.blockK, config.blockN};
+    sharedBShape = {2, config.blockK, sharedBColumns(config)};
   } else {
     sharedAShape = {config.blockM, config.blockK};
-    sharedBShape = {config.blockK, config.blockN};
+    sharedBShape = {config.blockK, sharedBColumns(config)};
   }
   auto sharedAType = MemRefType::get(sharedAShape, rewriter.getF32Type(),
                                      MemRefLayoutAttrInterface{},
@@ -1030,7 +1105,7 @@ void emitConvolutionKernel(IRRewriter &rewriter,
       {config.blockM, config.blockK}, rewriter.getF32Type(),
       MemRefLayoutAttrInterface{}, workgroupSpace);
   auto sharedBType = MemRefType::get(
-      {config.blockK, config.blockN}, rewriter.getF32Type(),
+      {config.blockK, sharedBColumns(config)}, rewriter.getF32Type(),
       MemRefLayoutAttrInterface{}, workgroupSpace);
   auto launch = gpu::LaunchOp::create(
       rewriter, loc, gridX, gridY, nSize, blockSize, one, one,
@@ -1096,7 +1171,8 @@ void emitConvolutionKernel(IRRewriter &rewriter,
               tileBuilder, tileLoc, input, filter, sharedA, sharedB, batch,
               blockFilter, blockPosition, kBase, threadId, fSize, cSize,
               ihSize, iwSize, ohSize, owSize, khSize, kwSize, reductionSize,
-              strideH, strideW, dilationH, dilationW, zeroFloat, config);
+              strideH, strideW, dilationH, dilationW, zeroFloat,
+              strides[1] == 1, config);
           gpu::BarrierOp::create(tileBuilder, tileLoc,
                                  gpu::AddressSpace::Workgroup);
           auto reduction = scf::ForOp::create(
@@ -1202,7 +1278,8 @@ void emitConvolutionKernel(IRRewriter &rewriter,
               tileBuilder, tileLoc, input, filter, sharedA, sharedB, batch,
               blockFilter, blockPosition, kBase, threadId, fSize, cSize,
               ihSize, iwSize, ohSize, owSize, khSize, kwSize, reductionSize,
-              strideH, strideW, dilationH, dilationW, zeroFloat, config);
+              strideH, strideW, dilationH, dilationW, zeroFloat,
+              strides[1] == 1, config);
           gpu::BarrierOp::create(tileBuilder, tileLoc,
                                  gpu::AddressSpace::Workgroup);
           SmallVector<Value> next(tileAccumulators.begin(),
@@ -1599,7 +1676,7 @@ void LowerContractionToGpuPass::runOnOperation() {
   }
   int64_t sharedBytes = config.stages *
                         (config.blockM * config.blockK +
-                         config.blockK * config.blockN) *
+                         config.blockK * sharedBColumns(config)) *
                         static_cast<int64_t>(sizeof(float));
   if (sharedBytes > 48 * 1024) {
     getOperation().emitError()

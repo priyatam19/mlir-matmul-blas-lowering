@@ -9,7 +9,7 @@ func.func @async_shared_matmul(%lhs: memref<65x17xf32>,
 }
 
 // CHECK-LABEL: func.func @async_shared_matmul
-// CHECK: gpu.launch {{.*}} workgroup(%[[A:.*]] : memref<2x64x16xf32, #gpu.address_space<workgroup>>, %[[B:.*]] : memref<2x16x64xf32, #gpu.address_space<workgroup>>)
+// CHECK: gpu.launch {{.*}} workgroup(%[[A:.*]] : memref<2x64x16xf32, #gpu.address_space<workgroup>>, %[[B:.*]] : memref<2x16x65xf32, #gpu.address_space<workgroup>>)
 // CHECK: nvgpu.device_async_copy {{.*}}, %[[A]]
 // CHECK: nvgpu.device_async_copy {{.*}}, %[[B]]
 // CHECK: nvgpu.device_async_create_group
