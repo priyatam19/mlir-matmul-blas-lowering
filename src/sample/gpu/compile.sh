@@ -56,6 +56,14 @@ if [[ "${LINK_TUTORIAL_GPU_RUNTIME:-0}" == "1" ]]; then
   extra_objects+=("${COMPILE_WORK_DIR}/tutorial_gpu_runtime.o")
   extra_libraries+=("-lcublas")
 fi
+if [[ "${LINK_TUTORIAL_AUTOTUNE_RUNTIME:-0}" == "1" ]]; then
+  g++ -std=c++17 -O3 -I"${CUDA_HOME}/include" \
+    -I"${PROJECT_ROOT}/src/runtime" \
+    -DMLIR_TUTORIAL_COMPILER_REVISION='"c155656-llvm-068c6c5"' \
+    -c "${PROJECT_ROOT}/src/runtime/TutorialAutotuneRuntime.cpp" \
+    -o "${COMPILE_WORK_DIR}/tutorial_autotune_runtime.o"
+  extra_objects+=("${COMPILE_WORK_DIR}/tutorial_autotune_runtime.o")
+fi
 if [[ "${LINK_CUDNN:-0}" == "1" ]]; then
   if [[ -e "${CUDA_HOME}/include/cudnn.h" ]]; then
     CUDNN_INCLUDE_DIR="${CUDA_HOME}/include"

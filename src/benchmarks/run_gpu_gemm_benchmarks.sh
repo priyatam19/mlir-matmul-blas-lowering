@@ -54,7 +54,12 @@ for shape in ${SHAPES}; do
       BLOCK_M="${BLOCK_M}" BLOCK_N="${BLOCK_N}" \
       CUDA_CHIP="${CUDA_CHIP}" CUDA_PTX_FEATURE="${CUDA_PTX_FEATURE}" \
       bash run_mlir_pipeline.sh
+    autotune_runtime=0
+    if [[ "${GPU_LOWERING}" == "autotuned" ]]; then
+      autotune_runtime=1
+    fi
     SAMPLE_CALL="${harness}" OUTPUT_BINARY="${binary}" LINK_CUBLAS=1 WRAP_MALLOC=0 \
+      LINK_TUTORIAL_AUTOTUNE_RUNTIME="${autotune_runtime}" \
       bash compile.sh
   )
 

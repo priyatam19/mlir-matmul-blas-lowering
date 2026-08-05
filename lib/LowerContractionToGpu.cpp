@@ -290,14 +290,13 @@ Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
       tokens);
 }
 
-void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
-                 const KernelConfig &config) {
+void emitSharedMatmulKernel(IRRewriter &rewriter, linalg::MatmulOp matmul,
+                            const KernelConfig &config) {
   Location loc = matmul.getLoc();
   Value lhs = matmul.getDpsInputs()[0];
   Value rhs = matmul.getDpsInputs()[1];
   Value output = matmul.getDpsInits()[0];
 
-  rewriter.setInsertionPoint(matmul);
   Value one = indexConstant(rewriter, loc, 1);
   Value zero = indexConstant(rewriter, loc, 0);
   Value zeroFloat = arith::ConstantFloatOp::create(
@@ -480,6 +479,149 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
     }
   }
   gpu::TerminatorOp::create(rewriter, loc);
+  rewriter.setInsertionPointAfter(launch);
+}
+
+void emitBlockThreadMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul) {
+  Location loc = matmul.getLoc();
+  Value lhs = matmul.getDpsInputs()[0];
+  Value rhs = matmul.getDpsInputs()[1];
+  Value output = matmul.getDpsInits()[0];
+  Value zero = indexConstant(rewriter, loc, 0);
+  Value one = indexConstant(rewriter, loc, 1);
+  Value blockM = indexConstant(rewriter, loc, 8);
+  Value blockN = indexConstant(rewriter, loc, 32);
+  Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
+  Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
+
+  auto blocks = scf::ParallelOp::create(
+      rewriter, loc, ValueRange{zero, zero}, ValueRange{mSize, nSize},
+      ValueRange{blockM, blockN},
+      [&](OpBuilder &blockBuilder, Location blockLoc, ValueRange blockIndices) {
+        scf::ParallelOp::create(
+            blockBuilder, blockLoc, ValueRange{zero, zero},
+            ValueRange{blockM, blockN}, ValueRange{one, one},
+            [&](OpBuilder &threadBuilder, Location threadLoc,
+                ValueRange threadIndices) {
+              Value row = arith::AddIOp::create(
+                  threadBuilder, threadLoc, blockIndices[0], threadIndices[0]);
+              Value column = arith::AddIOp::create(
+                  threadBuilder, threadLoc, blockIndices[1], threadIndices[1]);
+              Value condition = inBounds2D(threadBuilder, threadLoc, row, mSize,
+                                           column, nSize);
+              scf::IfOp::create(
+                  threadBuilder, threadLoc, condition,
+                  [&](OpBuilder &ifBuilder, Location ifLoc) {
+                    Value initial = memref::LoadOp::create(
+                        ifBuilder, ifLoc, output, ValueRange{row, column});
+                    auto reduction = scf::ForOp::create(
+                        ifBuilder, ifLoc, zero, kSize, one,
+                        ValueRange{initial},
+                        [&](OpBuilder &reductionBuilder, Location reductionLoc,
+                            Value k, ValueRange iterArgs) {
+                          Value lhsValue = memref::LoadOp::create(
+                              reductionBuilder, reductionLoc, lhs,
+                              ValueRange{row, k});
+                          Value rhsValue = memref::LoadOp::create(
+                              reductionBuilder, reductionLoc, rhs,
+                              ValueRange{k, column});
+                          Value product = arith::MulFOp::create(
+                              reductionBuilder, reductionLoc, lhsValue,
+                              rhsValue);
+                          Value sum = arith::AddFOp::create(
+                              reductionBuilder, reductionLoc, iterArgs[0],
+                              product);
+                          scf::YieldOp::create(reductionBuilder, reductionLoc,
+                                               sum);
+                        });
+                    memref::StoreOp::create(ifBuilder, ifLoc,
+                                            reduction.getResult(0), output,
+                                            ValueRange{row, column});
+                    scf::YieldOp::create(ifBuilder, ifLoc);
+                  });
+            });
+      });
+  rewriter.setInsertionPointAfter(blocks);
+}
+
+func::FuncOp getOrCreateRuntimeFunction(ModuleOp module, OpBuilder &builder,
+                                        StringRef name, FunctionType type) {
+  if (auto function = module.lookupSymbol<func::FuncOp>(name))
+    return function;
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(module.getBody());
+  auto function = func::FuncOp::create(builder, module.getLoc(), name, type);
+  function.setPrivate();
+  return function;
+}
+
+Value buildAutotuneKey(OpBuilder &builder, Location loc, Value mSize,
+                       Value nSize, Value kSize) {
+  Type i64Type = builder.getI64Type();
+  Value hash = arith::ConstantIntOp::create(
+      builder, loc, i64Type, 0x434f4e5452414354LL);
+  Value multiplier =
+      arith::ConstantIntOp::create(builder, loc, i64Type, 1099511628211LL);
+  for (Value dimension : {mSize, nSize, kSize}) {
+    Value cast = arith::IndexCastOp::create(builder, loc, i64Type, dimension);
+    hash = arith::MulIOp::create(builder, loc, hash, multiplier);
+    hash = arith::AddIOp::create(builder, loc, hash, cast);
+  }
+  return hash;
+}
+
+void lowerAutotunedMatmul(IRRewriter &rewriter, ModuleOp module,
+                          linalg::MatmulOp matmul) {
+  Location loc = matmul.getLoc();
+  Value lhs = matmul.getDpsInputs()[0];
+  Value output = matmul.getDpsInits()[0];
+  rewriter.setInsertionPoint(matmul);
+  Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
+  Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
+  Value key = buildAutotuneKey(rewriter, loc, mSize, nSize, kSize);
+  Value candidateCount = arith::ConstantIntOp::create(
+      rewriter, loc, rewriter.getI64Type(), 8);
+  auto beginType = rewriter.getFunctionType(
+      {rewriter.getI64Type(), rewriter.getI64Type()},
+      {rewriter.getIndexType()});
+  auto endType = rewriter.getFunctionType(
+      {rewriter.getI64Type(), rewriter.getIndexType()}, {});
+  func::FuncOp begin = getOrCreateRuntimeFunction(
+      module, rewriter, "tutorial_autotune_begin", beginType);
+  func::FuncOp end = getOrCreateRuntimeFunction(
+      module, rewriter, "tutorial_autotune_end", endType);
+  Value candidate =
+      func::CallOp::create(rewriter, loc, begin, ValueRange{key, candidateCount})
+          .getResult(0);
+
+  SmallVector<KernelConfig> profiles{
+      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
+      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
+      {128, 128, 16, 256, 4, 2}, {64, 128, 32, 256, 4, 2},
+      {128, 64, 32, 256, 4, 2}};
+  SmallVector<int64_t> cases{0, 1, 2, 3, 4, 5, 6};
+  auto dispatch = scf::IndexSwitchOp::create(
+      rewriter, loc, TypeRange{}, candidate, cases, cases.size());
+  for (Region &region : dispatch->getRegions()) {
+    Block *block = rewriter.createBlock(&region);
+    rewriter.setInsertionPointToEnd(block);
+    scf::YieldOp::create(rewriter, loc);
+  }
+
+  rewriter.setInsertionPoint(dispatch.getCaseBlock(0).getTerminator());
+  emitBlockThreadMatmul(rewriter, matmul);
+  for (size_t index = 0; index < profiles.size() - 1; ++index) {
+    rewriter.setInsertionPoint(
+        dispatch.getCaseBlock(static_cast<unsigned>(index + 1)).getTerminator());
+    emitSharedMatmulKernel(rewriter, matmul, profiles[index]);
+  }
+  rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
+  emitSharedMatmulKernel(rewriter, matmul, profiles.back());
+
+  rewriter.setInsertionPointAfter(dispatch);
+  func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
   rewriter.eraseOp(matmul);
 }
 
@@ -487,7 +629,8 @@ void lowerMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul,
 
 void LowerContractionToGpuPass::runOnOperation() {
   KernelConfig config{blockM, blockN, blockK, threads, vectorWidth, stages};
-  if (strategy != "shared-fp32" && strategy != "tensorcore-tf32") {
+  if (strategy != "shared-fp32" && strategy != "tensorcore-tf32" &&
+      strategy != "autotuned") {
     getOperation().emitError() << "unknown GPU contraction strategy: "
                                << strategy;
     return signalPassFailure();
@@ -536,8 +679,15 @@ void LowerContractionToGpuPass::runOnOperation() {
   });
 
   IRRewriter rewriter(&getContext());
-  for (linalg::MatmulOp matmul : worklist)
-    lowerMatmul(rewriter, matmul, config);
+  for (linalg::MatmulOp matmul : worklist) {
+    if (strategy == "autotuned") {
+      lowerAutotunedMatmul(rewriter, getOperation(), matmul);
+      continue;
+    }
+    rewriter.setInsertionPoint(matmul);
+    emitSharedMatmulKernel(rewriter, matmul, config);
+    rewriter.eraseOp(matmul);
+  }
 }
 
 } // namespace mlir::tutorial

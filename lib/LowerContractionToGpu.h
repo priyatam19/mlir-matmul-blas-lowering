@@ -45,7 +45,8 @@ struct LowerContractionToGpuPass
 
   Option<std::string> strategy{
       *this, "strategy",
-      llvm::cl::desc("Kernel strategy: shared-fp32 or tensorcore-tf32"),
+      llvm::cl::desc(
+          "Kernel strategy: shared-fp32, tensorcore-tf32, or autotuned"),
       llvm::cl::init("shared-fp32")};
   Option<std::string> target{
       *this, "target", llvm::cl::desc("GPU architecture profile"),
