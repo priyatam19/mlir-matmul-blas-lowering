@@ -3,6 +3,8 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LLVM.h"
 
+#include <array>
+
 using namespace mlir;
 
 namespace mlir::tutorial {
@@ -62,6 +64,41 @@ bool isSupportedBatchMatmul(linalg::BatchMatmulOp batchMatmul) {
          isContiguousF32Batch(inputs[0]) &&
          isContiguousF32Batch(inputs[1]) &&
          isContiguousF32Batch(outputs[0]);
+}
+
+FailureOr<std::array<int64_t, 2>> getPositivePair(DenseIntElementsAttr attr) {
+  if (!attr || attr.getNumElements() != 2)
+    return failure();
+  std::array<int64_t, 2> values;
+  size_t index = 0;
+  for (APInt value : attr.getValues<APInt>())
+    values[index++] = value.getSExtValue();
+  if (values[0] <= 0 || values[1] <= 0)
+    return failure();
+  return values;
+}
+
+bool isContiguousF32Rank4(Value value) {
+  auto type = dyn_cast<MemRefType>(value.getType());
+  if (!type || type.getRank() != 4 || !type.getElementType().isF32())
+    return false;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  return succeeded(type.getStridesAndOffset(strides, offset)) &&
+         strides.back() == 1;
+}
+
+bool isSupportedConvolution(linalg::Conv2DNchwFchwOp conv) {
+  if (conv->getNumResults() != 0 ||
+      failed(getPositivePair(conv.getStrides())) ||
+      failed(getPositivePair(conv.getDilations())))
+    return false;
+  auto inputs = conv.getDpsInputs();
+  auto outputs = conv.getDpsInits();
+  return inputs.size() == 2 && outputs.size() == 1 &&
+         isContiguousF32Rank4(inputs[0]) &&
+         isContiguousF32Rank4(inputs[1]) &&
+         isContiguousF32Rank4(outputs[0]);
 }
 
 SmallVector<Value> matrixIndices(Value batch, Value row, Value column) {
@@ -324,6 +361,105 @@ Value emitAsyncTileLoads(OpBuilder &builder, Location loc, Value lhs,
   return nvgpu::DeviceAsyncCreateGroupOp::create(
       builder, loc, nvgpu::DeviceAsyncTokenType::get(builder.getContext()),
       tokens);
+}
+
+void emitConvolutionTileLoads(
+    OpBuilder &builder, Location loc, Value input, Value filter, Value sharedA,
+    Value sharedB, Value batch, Value blockFilter, Value blockPosition,
+    Value kBase, Value threadId, Value fSize, Value cSize, Value ihSize,
+    Value iwSize, Value ohSize, Value owSize, Value khSize, Value kwSize,
+    Value reductionSize, Value strideH, Value strideW, Value dilationH,
+    Value dilationW, Value zeroFloat, const KernelConfig &config) {
+  Value threadsValue = indexConstant(builder, loc, config.threads);
+  Value totalA = indexConstant(builder, loc, config.blockM * config.blockK);
+  Value totalB = indexConstant(builder, loc, config.blockK * config.blockN);
+  Value blockKValue = indexConstant(builder, loc, config.blockK);
+  Value blockNValue = indexConstant(builder, loc, config.blockN);
+
+  scf::ForOp::create(
+      builder, loc, threadId, totalA, threadsValue, ValueRange{},
+      [&](OpBuilder &loadBuilder, Location loadLoc, Value linear, ValueRange) {
+        Value localFilter = arith::DivUIOp::create(
+            loadBuilder, loadLoc, linear, blockKValue);
+        Value localK = arith::RemUIOp::create(loadBuilder, loadLoc, linear,
+                                              blockKValue);
+        Value globalFilter = arith::AddIOp::create(
+            loadBuilder, loadLoc, blockFilter, localFilter);
+        Value globalK =
+            arith::AddIOp::create(loadBuilder, loadLoc, kBase, localK);
+        Value kw = arith::RemUIOp::create(loadBuilder, loadLoc, globalK,
+                                          kwSize);
+        Value quotient = arith::DivUIOp::create(loadBuilder, loadLoc, globalK,
+                                                kwSize);
+        Value kh = arith::RemUIOp::create(loadBuilder, loadLoc, quotient,
+                                          khSize);
+        Value channel = arith::DivUIOp::create(loadBuilder, loadLoc, quotient,
+                                               khSize);
+        Value condition = inBounds2D(loadBuilder, loadLoc, globalFilter, fSize,
+                                     globalK, reductionSize);
+        Value loaded = guardedLoad(
+            loadBuilder, loadLoc, filter,
+            ValueRange{globalFilter, channel, kh, kw}, condition, zeroFloat);
+        memref::StoreOp::create(loadBuilder, loadLoc, loaded, sharedA,
+                                ValueRange{localFilter, localK});
+        scf::YieldOp::create(loadBuilder, loadLoc);
+      });
+
+  Value positionSize =
+      arith::MulIOp::create(builder, loc, ohSize, owSize);
+  scf::ForOp::create(
+      builder, loc, threadId, totalB, threadsValue, ValueRange{},
+      [&](OpBuilder &loadBuilder, Location loadLoc, Value linear, ValueRange) {
+        Value localK = arith::DivUIOp::create(loadBuilder, loadLoc, linear,
+                                              blockNValue);
+        Value localPosition = arith::RemUIOp::create(
+            loadBuilder, loadLoc, linear, blockNValue);
+        Value globalK =
+            arith::AddIOp::create(loadBuilder, loadLoc, kBase, localK);
+        Value globalPosition = arith::AddIOp::create(
+            loadBuilder, loadLoc, blockPosition, localPosition);
+        Value kw = arith::RemUIOp::create(loadBuilder, loadLoc, globalK,
+                                          kwSize);
+        Value quotient = arith::DivUIOp::create(loadBuilder, loadLoc, globalK,
+                                                kwSize);
+        Value kh = arith::RemUIOp::create(loadBuilder, loadLoc, quotient,
+                                          khSize);
+        Value channel = arith::DivUIOp::create(loadBuilder, loadLoc, quotient,
+                                               khSize);
+        Value ow = arith::RemUIOp::create(loadBuilder, loadLoc, globalPosition,
+                                          owSize);
+        Value oh = arith::DivUIOp::create(loadBuilder, loadLoc, globalPosition,
+                                          owSize);
+        Value inputH = arith::MulIOp::create(loadBuilder, loadLoc, oh, strideH);
+        inputH = arith::AddIOp::create(
+            loadBuilder, loadLoc, inputH,
+            arith::MulIOp::create(loadBuilder, loadLoc, kh, dilationH));
+        Value inputW = arith::MulIOp::create(loadBuilder, loadLoc, ow, strideW);
+        inputW = arith::AddIOp::create(
+            loadBuilder, loadLoc, inputW,
+            arith::MulIOp::create(loadBuilder, loadLoc, kw, dilationW));
+        Value kOk = arith::CmpIOp::create(loadBuilder, loadLoc,
+                                          arith::CmpIPredicate::ult, globalK,
+                                          reductionSize);
+        Value positionOk = arith::CmpIOp::create(
+            loadBuilder, loadLoc, arith::CmpIPredicate::ult, globalPosition,
+            positionSize);
+        Value hOk = arith::CmpIOp::create(loadBuilder, loadLoc,
+                                          arith::CmpIPredicate::ult, inputH,
+                                          ihSize);
+        Value wOk = arith::CmpIOp::create(loadBuilder, loadLoc,
+                                          arith::CmpIPredicate::ult, inputW,
+                                          iwSize);
+        Value condition = andValues(loadBuilder, loadLoc, kOk, positionOk);
+        condition = andValues(loadBuilder, loadLoc, condition, hOk);
+        condition = andValues(loadBuilder, loadLoc, condition, wOk);
+        Value loaded = guardedLoad(
+            loadBuilder, loadLoc, input,
+            ValueRange{batch, channel, inputH, inputW}, condition, zeroFloat);
+        memref::StoreOp::create(loadBuilder, loadLoc, loaded, sharedB,
+                                ValueRange{localK, localPosition});
+        scf::YieldOp::create(loadBuilder, loadLoc);
+      });
 }
 
 Value zeroVector(OpBuilder &builder, Location loc, VectorType type) {
@@ -777,6 +913,295 @@ void emitTensorCoreBatchMatmulKernel(IRRewriter &rewriter,
       /*batched=*/true, config);
 }
 
+SmallVector<Value> convolutionOutputIndices(OpBuilder &builder, Location loc,
+                                            Value batch, Value filter,
+                                            Value position, Value owSize) {
+  Value ow = arith::RemUIOp::create(builder, loc, position, owSize);
+  Value oh = arith::DivUIOp::create(builder, loc, position, owSize);
+  return {batch, filter, oh, ow};
+}
+
+Value initializeConvolutionTensorCoreAccumulator(
+    OpBuilder &builder, Location loc, Value output, Value batch, Value filter0,
+    Value filter1, Value position, Value fSize, Value positionSize,
+    Value owSize, Value zeroFloat) {
+  auto accumulatorType = VectorType::get({2, 2}, builder.getF32Type());
+  Value accumulator = zeroVector(builder, loc, accumulatorType);
+  for (int64_t row = 0; row < 2; ++row) {
+    for (int64_t column = 0; column < 2; ++column) {
+      Value globalFilter = row == 0 ? filter0 : filter1;
+      Value globalPosition = arith::AddIOp::create(
+          builder, loc, position, indexConstant(builder, loc, column));
+      Value condition = inBounds2D(builder, loc, globalFilter, fSize,
+                                   globalPosition, positionSize);
+      Value initial = guardedLoad(
+          builder, loc, output,
+          convolutionOutputIndices(builder, loc, batch, globalFilter,
+                                   globalPosition, owSize),
+          condition, zeroFloat);
+      accumulator = insertVectorElement(builder, loc, initial, accumulator,
+                                        {row, column});
+    }
+  }
+  return accumulator;
+}
+
+void emitConvolutionKernel(IRRewriter &rewriter,
+                           linalg::Conv2DNchwFchwOp conv,
+                           const KernelConfig &config, bool tensorCore) {
+  Location loc = conv.getLoc();
+  Value input = conv.getDpsInputs()[0];
+  Value filter = conv.getDpsInputs()[1];
+  Value output = conv.getDpsInits()[0];
+  auto strides = *getPositivePair(conv.getStrides());
+  auto dilations = *getPositivePair(conv.getDilations());
+  Value zero = indexConstant(rewriter, loc, 0);
+  Value one = indexConstant(rewriter, loc, 1);
+  Value zeroFloat = arith::ConstantFloatOp::create(
+      rewriter, loc, rewriter.getF32Type(), APFloat(0.0f));
+  Value strideH = indexConstant(rewriter, loc, strides[0]);
+  Value strideW = indexConstant(rewriter, loc, strides[1]);
+  Value dilationH = indexConstant(rewriter, loc, dilations[0]);
+  Value dilationW = indexConstant(rewriter, loc, dilations[1]);
+  Value nSize = memref::DimOp::create(rewriter, loc, output, 0);
+  Value fSize = memref::DimOp::create(rewriter, loc, output, 1);
+  Value ohSize = memref::DimOp::create(rewriter, loc, output, 2);
+  Value owSize = memref::DimOp::create(rewriter, loc, output, 3);
+  Value cSize = memref::DimOp::create(rewriter, loc, input, 1);
+  Value ihSize = memref::DimOp::create(rewriter, loc, input, 2);
+  Value iwSize = memref::DimOp::create(rewriter, loc, input, 3);
+  Value khSize = memref::DimOp::create(rewriter, loc, filter, 2);
+  Value kwSize = memref::DimOp::create(rewriter, loc, filter, 3);
+  Value positionSize = arith::MulIOp::create(rewriter, loc, ohSize, owSize);
+  Value reductionSize = arith::MulIOp::create(rewriter, loc, cSize, khSize);
+  reductionSize =
+      arith::MulIOp::create(rewriter, loc, reductionSize, kwSize);
+  Value gridX = ceilDiv(rewriter, loc, positionSize, config.blockN);
+  Value gridY = ceilDiv(rewriter, loc, fSize, config.blockM);
+  Value blockSize = indexConstant(rewriter, loc, config.threads);
+  Value blockKValue = indexConstant(rewriter, loc, config.blockK);
+
+  auto workgroupSpace = gpu::AddressSpaceAttr::get(
+      rewriter.getContext(), gpu::AddressSpace::Workgroup);
+  auto sharedAType = MemRefType::get(
+      {config.blockM, config.blockK}, rewriter.getF32Type(),
+      MemRefLayoutAttrInterface{}, workgroupSpace);
+  auto sharedBType = MemRefType::get(
+      {config.blockK, config.blockN}, rewriter.getF32Type(),
+      MemRefLayoutAttrInterface{}, workgroupSpace);
+  auto launch = gpu::LaunchOp::create(
+      rewriter, loc, gridX, gridY, nSize, blockSize, one, one,
+      /*dynamicSharedMemorySize=*/nullptr, /*asyncTokenType=*/nullptr,
+      /*asyncDependencies=*/ValueRange{},
+      SmallVector<Type>{sharedAType, sharedBType});
+  Block &body = launch.getBody().front();
+  rewriter.setInsertionPointToStart(&body);
+  Value blockX = launch.getBlockIds().x;
+  Value blockY = launch.getBlockIds().y;
+  Value batch = launch.getBlockIds().z;
+  Value threadId = launch.getThreadIds().x;
+  Value sharedA = body.getArgument(gpu::LaunchOp::kNumConfigRegionAttributes);
+  Value sharedB =
+      body.getArgument(gpu::LaunchOp::kNumConfigRegionAttributes + 1);
+  Value blockFilter = arith::MulIOp::create(
+      rewriter, loc, blockY, indexConstant(rewriter, loc, config.blockM));
+  Value blockPosition = arith::MulIOp::create(
+      rewriter, loc, blockX, indexConstant(rewriter, loc, config.blockN));
+
+  if (!tensorCore) {
+    Value warpWidth = indexConstant(rewriter, loc, 32);
+    int64_t threadRows = config.threads / 32;
+    int64_t microRows = config.blockM / threadRows;
+    int64_t microColumns = config.blockN / 32;
+    Value threadFilter =
+        arith::DivUIOp::create(rewriter, loc, threadId, warpWidth);
+    Value threadPosition =
+        arith::RemUIOp::create(rewriter, loc, threadId, warpWidth);
+    SmallVector<Value> filters;
+    SmallVector<Value> positions;
+    for (int64_t row = 0; row < microRows; ++row) {
+      Value offset = arith::AddIOp::create(
+          rewriter, loc, threadFilter,
+          indexConstant(rewriter, loc, row * threadRows));
+      filters.push_back(
+          arith::AddIOp::create(rewriter, loc, blockFilter, offset));
+    }
+    for (int64_t column = 0; column < microColumns; ++column) {
+      Value offset = arith::AddIOp::create(
+          rewriter, loc, threadPosition,
+          indexConstant(rewriter, loc, column * 32));
+      positions.push_back(
+          arith::AddIOp::create(rewriter, loc, blockPosition, offset));
+    }
+    SmallVector<Value> accumulators;
+    for (Value globalFilter : filters) {
+      for (Value globalPosition : positions) {
+        Value condition = inBounds2D(rewriter, loc, globalFilter, fSize,
+                                     globalPosition, positionSize);
+        accumulators.push_back(guardedLoad(
+            rewriter, loc, output,
+            convolutionOutputIndices(rewriter, loc, batch, globalFilter,
+                                     globalPosition, owSize),
+            condition, zeroFloat));
+      }
+    }
+    auto kTiles = scf::ForOp::create(
+        rewriter, loc, zero, reductionSize, blockKValue, accumulators,
+        [&](OpBuilder &tileBuilder, Location tileLoc, Value kBase,
+            ValueRange tileAccumulators) {
+          emitConvolutionTileLoads(
+              tileBuilder, tileLoc, input, filter, sharedA, sharedB, batch,
+              blockFilter, blockPosition, kBase, threadId, fSize, cSize,
+              ihSize, iwSize, ohSize, owSize, khSize, kwSize, reductionSize,
+              strideH, strideW, dilationH, dilationW, zeroFloat, config);
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+          auto reduction = scf::ForOp::create(
+              tileBuilder, tileLoc, zero, blockKValue, one, tileAccumulators,
+              [&](OpBuilder &kBuilder, Location kLoc, Value localK,
+                  ValueRange kAccumulators) {
+                SmallVector<Value> lhsValues;
+                SmallVector<Value> rhsValues;
+                for (Value globalFilter : filters) {
+                  Value localFilter = arith::SubIOp::create(
+                      kBuilder, kLoc, globalFilter, blockFilter);
+                  lhsValues.push_back(memref::LoadOp::create(
+                      kBuilder, kLoc, sharedA,
+                      ValueRange{localFilter, localK}));
+                }
+                for (Value globalPosition : positions) {
+                  Value localPosition = arith::SubIOp::create(
+                      kBuilder, kLoc, globalPosition, blockPosition);
+                  rhsValues.push_back(memref::LoadOp::create(
+                      kBuilder, kLoc, sharedB,
+                      ValueRange{localK, localPosition}));
+                }
+                SmallVector<Value> next;
+                size_t index = 0;
+                for (Value lhsValue : lhsValues) {
+                  for (Value rhsValue : rhsValues) {
+                    Value product = arith::MulFOp::create(
+                        kBuilder, kLoc, lhsValue, rhsValue);
+                    next.push_back(arith::AddFOp::create(
+                        kBuilder, kLoc, kAccumulators[index++], product));
+                  }
+                }
+                scf::YieldOp::create(kBuilder, kLoc, next);
+              });
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+          scf::YieldOp::create(tileBuilder, tileLoc, reduction.getResults());
+        });
+    size_t index = 0;
+    for (Value globalFilter : filters) {
+      for (Value globalPosition : positions) {
+        Value condition = inBounds2D(rewriter, loc, globalFilter, fSize,
+                                     globalPosition, positionSize);
+        guardedStore(
+            rewriter, loc, kTiles.getResult(index++), output,
+            convolutionOutputIndices(rewriter, loc, batch, globalFilter,
+                                     globalPosition, owSize),
+            condition);
+      }
+    }
+  } else {
+    Value laneId = arith::RemUIOp::create(
+        rewriter, loc, threadId, indexConstant(rewriter, loc, 32));
+    Value warpId = arith::DivUIOp::create(
+        rewriter, loc, threadId, indexConstant(rewriter, loc, 32));
+    int64_t warps = config.threads / 32;
+    int64_t tilesN = config.blockN / 8;
+    int64_t tilesPerWarp = (config.blockM / 16) * tilesN / warps;
+    struct ConvWarpTile {
+      Value localM;
+      Value localN;
+      Value filter0;
+      Value filter1;
+      Value position;
+    };
+    SmallVector<ConvWarpTile> warpTiles;
+    SmallVector<Value> accumulators;
+    for (int64_t assignment = 0; assignment < tilesPerWarp; ++assignment) {
+      Value tile = arith::AddIOp::create(
+          rewriter, loc, warpId,
+          indexConstant(rewriter, loc, assignment * warps));
+      Value tileM = arith::DivUIOp::create(
+          rewriter, loc, tile, indexConstant(rewriter, loc, tilesN));
+      Value tileN = arith::RemUIOp::create(
+          rewriter, loc, tile, indexConstant(rewriter, loc, tilesN));
+      Value localM = arith::MulIOp::create(
+          rewriter, loc, tileM, indexConstant(rewriter, loc, 16));
+      Value localN = arith::MulIOp::create(
+          rewriter, loc, tileN, indexConstant(rewriter, loc, 8));
+      Value laneRow = arith::DivUIOp::create(
+          rewriter, loc, laneId, indexConstant(rewriter, loc, 4));
+      Value laneColumn = arith::RemUIOp::create(
+          rewriter, loc, laneId, indexConstant(rewriter, loc, 4));
+      laneColumn = arith::MulIOp::create(
+          rewriter, loc, laneColumn, indexConstant(rewriter, loc, 2));
+      Value filter0 = arith::AddIOp::create(rewriter, loc, blockFilter, localM);
+      filter0 = arith::AddIOp::create(rewriter, loc, filter0, laneRow);
+      Value filter1 = arith::AddIOp::create(
+          rewriter, loc, filter0, indexConstant(rewriter, loc, 8));
+      Value position =
+          arith::AddIOp::create(rewriter, loc, blockPosition, localN);
+      position = arith::AddIOp::create(rewriter, loc, position, laneColumn);
+      warpTiles.push_back({localM, localN, filter0, filter1, position});
+      accumulators.push_back(initializeConvolutionTensorCoreAccumulator(
+          rewriter, loc, output, batch, filter0, filter1, position, fSize,
+          positionSize, owSize, zeroFloat));
+    }
+    auto kTiles = scf::ForOp::create(
+        rewriter, loc, zero, reductionSize, blockKValue, accumulators,
+        [&](OpBuilder &tileBuilder, Location tileLoc, Value kBase,
+            ValueRange tileAccumulators) {
+          emitConvolutionTileLoads(
+              tileBuilder, tileLoc, input, filter, sharedA, sharedB, batch,
+              blockFilter, blockPosition, kBase, threadId, fSize, cSize,
+              ihSize, iwSize, ohSize, owSize, khSize, kwSize, reductionSize,
+              strideH, strideW, dilationH, dilationW, zeroFloat, config);
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+          SmallVector<Value> next(tileAccumulators.begin(),
+                                  tileAccumulators.end());
+          for (int64_t localK = 0; localK < config.blockK; localK += 8) {
+            Value localKValue = indexConstant(tileBuilder, tileLoc, localK);
+            for (size_t tile = 0; tile < warpTiles.size(); ++tile)
+              next[tile] = emitTensorCoreMma(
+                  tileBuilder, tileLoc, sharedA, sharedB,
+                  warpTiles[tile].localM, warpTiles[tile].localN, localKValue,
+                  laneId, next[tile]);
+          }
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+          scf::YieldOp::create(tileBuilder, tileLoc, next);
+        });
+    for (size_t tile = 0; tile < warpTiles.size(); ++tile) {
+      for (int64_t row = 0; row < 2; ++row) {
+        for (int64_t column = 0; column < 2; ++column) {
+          Value scalar = vector::ExtractOp::create(
+              rewriter, loc, kTiles.getResult(tile),
+              ArrayRef<int64_t>{row, column});
+          Value globalFilter = row == 0 ? warpTiles[tile].filter0
+                                        : warpTiles[tile].filter1;
+          Value globalPosition = arith::AddIOp::create(
+              rewriter, loc, warpTiles[tile].position,
+              indexConstant(rewriter, loc, column));
+          Value condition = inBounds2D(rewriter, loc, globalFilter, fSize,
+                                       globalPosition, positionSize);
+          guardedStore(
+              rewriter, loc, scalar, output,
+              convolutionOutputIndices(rewriter, loc, batch, globalFilter,
+                                       globalPosition, owSize),
+              condition);
+        }
+      }
+    }
+  }
+  gpu::TerminatorOp::create(rewriter, loc);
+  rewriter.setInsertionPointAfter(launch);
+}
+
 void emitBlockThreadMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul) {
   Location loc = matmul.getLoc();
   Value lhs = matmul.getDpsInputs()[0];
@@ -974,6 +1399,13 @@ void LowerContractionToGpuPass::runOnOperation() {
     if (isSupportedBatchMatmul(batchMatmul))
       batchWorklist.push_back(batchMatmul);
   });
+  SmallVector<linalg::Conv2DNchwFchwOp> convolutionWorklist;
+  if (strategy != "autotuned") {
+    getOperation().walk([&](linalg::Conv2DNchwFchwOp conv) {
+      if (isSupportedConvolution(conv))
+        convolutionWorklist.push_back(conv);
+    });
+  }
 
   IRRewriter rewriter(&getContext());
   for (linalg::MatmulOp matmul : worklist) {
@@ -995,6 +1427,12 @@ void LowerContractionToGpuPass::runOnOperation() {
     else
       emitSharedBatchMatmulKernel(rewriter, batchMatmul, config);
     rewriter.eraseOp(batchMatmul);
+  }
+  for (linalg::Conv2DNchwFchwOp conv : convolutionWorklist) {
+    rewriter.setInsertionPoint(conv);
+    emitConvolutionKernel(rewriter, conv, config,
+                          strategy == "tensorcore-tf32");
+    rewriter.eraseOp(conv);
   }
 }
 

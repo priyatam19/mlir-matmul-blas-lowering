@@ -13,8 +13,10 @@ SHAPES="${SHAPES:-conv_small conv_resnet_stem conv_resnet_block conv_pointwise c
 
 if [[ "${GPU_LOWERING}" != "untiled" &&
       "${GPU_LOWERING}" != "block-thread" &&
+      "${GPU_LOWERING}" != "shared-fp32" &&
+      "${GPU_LOWERING}" != "tensorcore-tf32" &&
       "${GPU_LOWERING}" != "vendor" ]]; then
-  echo "Convolution benchmarks support GPU_LOWERING=untiled, block-thread, or vendor." >&2
+  echo "Convolution benchmarks support GPU_LOWERING=untiled, block-thread, shared-fp32, tensorcore-tf32, or vendor." >&2
   exit 2
 fi
 
