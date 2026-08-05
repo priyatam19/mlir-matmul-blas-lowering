@@ -4,7 +4,7 @@
 - `bash run_mlir_pipeline.sh` to build the CPU/OpenBLAS executable from the MLIR-lowered PyTorch model.
 - `bash run_tiled_mlir_pipeline.sh` to run the custom `tile-matmul-for-cache` pass before lowering to LLVM.
 - `cd gpu && bash run_gpu_dialect_pipeline.sh` to verify GPU dialect lowering with the block/thread matmul pass on machines without CUDA.
-- `cd gpu && bash run_mlir_pipeline.sh` to run the CUDA/NVPTX lowering pipeline. Set `GPU_LOWERING=legacy`, `untiled`, or `block-thread` (the default) to select the matmul mapping.
+- `cd gpu && bash run_mlir_pipeline.sh` to run the CUDA/NVPTX lowering pipeline. Set `GPU_LOWERING=legacy`, `untiled`, `block-thread` (the default), `shared-fp32`, `tensorcore-tf32`, `autotuned`, or `vendor` to select the contraction lowering.
 - `cd gpu && bash compile.sh` to link a GPU launch executable on a machine with CUDA driver/runtime libraries and MLIR CUDA runtime support.
 - See `../../docs/CustomPassExtension.md` for the full extension workflow and verification commands.
 

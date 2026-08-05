@@ -29,7 +29,9 @@ same-harness untiled path by `50.1x` and the 1,024-launch legacy path by
 All regular and irregular operator shapes pass full-output validation. The
 custom kernels close much of the gap to vendor libraries, although
 compute-heavy shapes still need shared-memory tiling, vectorized access, and
-eventually tensor-core lowering.
+eventually tensor-core lowering. The next kernel family now implements those
+mechanisms; its L4 measurements remain intentionally separate until the new
+evaluation run is complete.
 
 ![Nsight Systems GPU-time and synchronization breakdown](docs/assets/performance/07_nsys_bottlenecks.png)
 
@@ -43,6 +45,11 @@ GEMM scaling, vendor efficiency, mixed-program results, tuning, methodology,
 and reproducible figure-generation commands. The
 [unified L4 evaluation](docs/l4_evaluation_results.md) contains the complete
 timing and correctness record.
+
+The [shared-memory and tensor-core lowering guide](docs/shared_memory_gpu_lowering.md)
+documents CTA K tiling, vector and asynchronous transfers, TF32 MMA lowering,
+direct implicit-GEMM convolution, persistent autotuning, and the prepared L4
+evaluation command.
 
 ## Tutorial content
 

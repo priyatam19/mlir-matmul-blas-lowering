@@ -10,7 +10,7 @@ CUDA_PTX_FEATURE="${CUDA_PTX_FEATURE:-+ptx80}"
 GPU_LOWERING="${GPU_LOWERING:-block-thread}"
 BLOCK_M="${BLOCK_M:-8}"
 BLOCK_N="${BLOCK_N:-32}"
-SHAPES="${SHAPES:-gemm_512 gemm_1024 gemm_2048 gemm_mobilenet gemm_irregular}"
+SHAPES="${SHAPES:-gemm_512 gemm_1024 gemm_2048 gemm_mobilenet gemm_irregular gemm_4096 gemm_tall gemm_wide gemm_ktail}"
 
 export PATH="${MLIR_BUILD_DIR}/bin:${BUILD}/tools:${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${MLIR_BUILD_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
@@ -21,6 +21,10 @@ declare -A models=(
   [gemm_2048]="gpu_gemm_2048.mlir"
   [gemm_mobilenet]="gpu_gemm_mobilenet.mlir"
   [gemm_irregular]="gpu_gemm_irregular.mlir"
+  [gemm_4096]="gpu_gemm_4096.mlir"
+  [gemm_tall]="gpu_gemm_tall.mlir"
+  [gemm_wide]="gpu_gemm_wide.mlir"
+  [gemm_ktail]="gpu_gemm_ktail.mlir"
 )
 declare -A harnesses=(
   [gemm_512]="large_gemm_gpu_bench.cpp"
@@ -28,6 +32,10 @@ declare -A harnesses=(
   [gemm_2048]="gpu_gemm_2048_bench.cpp"
   [gemm_mobilenet]="gpu_gemm_mobilenet_bench.cpp"
   [gemm_irregular]="gpu_gemm_irregular_bench.cpp"
+  [gemm_4096]="gpu_gemm_4096_bench.cpp"
+  [gemm_tall]="gpu_gemm_tall_bench.cpp"
+  [gemm_wide]="gpu_gemm_wide_bench.cpp"
+  [gemm_ktail]="gpu_gemm_ktail_bench.cpp"
 )
 
 for shape in ${SHAPES}; do
