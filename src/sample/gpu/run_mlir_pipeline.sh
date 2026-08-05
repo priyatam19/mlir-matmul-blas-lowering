@@ -75,6 +75,12 @@ case "${GPU_LOWERING}" in
         --lower-contraction-to-gpu="strategy=shared-fp32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=${CONTRACTION_STAGES}" \
         -o "${BUFFERIZED_MLIR}"
     ;;
+  tensorcore-tf32)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --lower-contraction-to-gpu="strategy=tensorcore-tf32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=1" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
   autotuned)
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
@@ -89,7 +95,7 @@ case "${GPU_LOWERING}" in
         -o "${BUFFERIZED_MLIR}"
     ;;
   *)
-    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, block-thread, shared-fp32, autotuned, or vendor." >&2
+    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, block-thread, shared-fp32, tensorcore-tf32, autotuned, or vendor." >&2
     exit 2
     ;;
 esac
