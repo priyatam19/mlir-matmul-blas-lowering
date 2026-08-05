@@ -498,7 +498,8 @@ Value initializeTensorCoreAccumulator(OpBuilder &builder, Location loc,
 
 Value emitTensorCoreMma(OpBuilder &builder, Location loc, Value sharedA,
                         Value sharedB, Value localM, Value localN,
-                        Value localK, Value laneId, Value accumulator) {
+                        Value localK, Value laneId, Value stage,
+                        Value accumulator) {
   Value sixteen = indexConstant(builder, loc, 16);
   Value four = indexConstant(builder, loc, 4);
   Value laneMod16 = arith::RemUIOp::create(builder, loc, laneId, sixteen);
@@ -509,8 +510,12 @@ Value emitTensorCoreMma(OpBuilder &builder, Location loc, Value sharedA,
   Value aColumn =
       arith::AddIOp::create(builder, loc, localK, aColumnOffset);
   auto aFragmentType = VectorType::get({4, 1}, builder.getF32Type());
+  SmallVector<Value> aIndices;
+  if (stage)
+    aIndices.push_back(stage);
+  aIndices.append({aRow, aColumn});
   Value aFragment = nvgpu::LdMatrixOp::create(
-      builder, loc, aFragmentType, sharedA, ValueRange{aRow, aColumn},
+      builder, loc, aFragmentType, sharedA, aIndices,
       /*transpose=*/false, /*numTiles=*/4);
 
   Value laneMod4 = arith::RemUIOp::create(builder, loc, laneId, four);
@@ -522,8 +527,12 @@ Value emitTensorCoreMma(OpBuilder &builder, Location loc, Value sharedA,
     Value bRowOffset = arith::AddIOp::create(
         builder, loc, laneMod4, indexConstant(builder, loc, part * 4));
     Value bRow = arith::AddIOp::create(builder, loc, localK, bRowOffset);
-    Value loaded = memref::LoadOp::create(builder, loc, sharedB,
-                                          ValueRange{bRow, bColumn});
+    SmallVector<Value> bIndices;
+    if (stage)
+      bIndices.push_back(stage);
+    bIndices.append({bRow, bColumn});
+    Value loaded =
+        memref::LoadOp::create(builder, loc, sharedB, bIndices);
     bFragment =
         insertVectorElement(builder, loc, loaded, bFragment, {part, 0});
   }
@@ -558,11 +567,17 @@ void emitTensorCoreContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
 
   auto workgroupSpace = gpu::AddressSpaceAttr::get(
       rewriter.getContext(), gpu::AddressSpace::Workgroup);
+  SmallVector<int64_t> sharedAShape = {config.blockM, config.blockK};
+  SmallVector<int64_t> sharedBShape = {config.blockK, config.blockN};
+  if (config.stages == 2) {
+    sharedAShape.insert(sharedAShape.begin(), 2);
+    sharedBShape.insert(sharedBShape.begin(), 2);
+  }
   auto sharedAType = MemRefType::get(
-      {config.blockM, config.blockK}, rewriter.getF32Type(),
+      sharedAShape, rewriter.getF32Type(),
       MemRefLayoutAttrInterface{}, workgroupSpace);
   auto sharedBType = MemRefType::get(
-      {config.blockK, config.blockN}, rewriter.getF32Type(),
+      sharedBShape, rewriter.getF32Type(),
       MemRefLayoutAttrInterface{}, workgroupSpace);
   auto launch = gpu::LaunchOp::create(
       rewriter, loc, gridX, gridY, batchSize, blockSize, one, one,
@@ -633,16 +648,41 @@ void emitTensorCoreContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
   }
 
   Value blockKValue = indexConstant(rewriter, loc, config.blockK);
+  if (config.stages == 2) {
+    Value initialGroup = emitAsyncTileLoads(
+        rewriter, loc, lhs, rhs, sharedA, sharedB, batch, zero, blockRow,
+        blockColumn, zero, threadId, mSize, nSize, kSize, config);
+    nvgpu::DeviceAsyncWaitOp::create(rewriter, loc, initialGroup, nullptr);
+    gpu::BarrierOp::create(rewriter, loc, gpu::AddressSpace::Workgroup);
+  }
   auto kTiles = scf::ForOp::create(
       rewriter, loc, zero, kSize, blockKValue, accumulators,
       [&](OpBuilder &tileBuilder, Location tileLoc, Value kBase,
           ValueRange tileAccumulators) {
-        emitCooperativeTileLoads(
-            tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch, blockRow,
-            blockColumn, kBase, threadId, mSize, nSize, kSize, zeroFloat,
-            config);
-        gpu::BarrierOp::create(tileBuilder, tileLoc,
-                               gpu::AddressSpace::Workgroup);
+        Value currentStage;
+        Value nextGroup;
+        if (config.stages == 2) {
+          Value tileNumber = arith::DivUIOp::create(
+              tileBuilder, tileLoc, kBase, blockKValue);
+          currentStage = arith::RemUIOp::create(
+              tileBuilder, tileLoc, tileNumber,
+              indexConstant(tileBuilder, tileLoc, 2));
+          Value nextStage = arith::SubIOp::create(
+              tileBuilder, tileLoc, one, currentStage);
+          Value nextK = arith::AddIOp::create(tileBuilder, tileLoc, kBase,
+                                              blockKValue);
+          nextGroup = emitAsyncTileLoads(
+              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch,
+              nextStage, blockRow, blockColumn, nextK, threadId, mSize, nSize,
+              kSize, config);
+        } else {
+          emitCooperativeTileLoads(
+              tileBuilder, tileLoc, lhs, rhs, sharedA, sharedB, batch,
+              blockRow, blockColumn, kBase, threadId, mSize, nSize, kSize,
+              zeroFloat, config);
+          gpu::BarrierOp::create(tileBuilder, tileLoc,
+                                 gpu::AddressSpace::Workgroup);
+        }
         SmallVector<Value> next(tileAccumulators.begin(),
                                 tileAccumulators.end());
         for (int64_t localK = 0; localK < config.blockK; localK += 8) {
@@ -651,8 +691,11 @@ void emitTensorCoreContractionKernel(IRRewriter &rewriter, Operation *sourceOp,
             next[tile] = emitTensorCoreMma(
                 tileBuilder, tileLoc, sharedA, sharedB,
                 warpTiles[tile].localM, warpTiles[tile].localN, localKValue,
-                laneId, next[tile]);
+                laneId, currentStage, next[tile]);
         }
+        if (config.stages == 2)
+          nvgpu::DeviceAsyncWaitOp::create(tileBuilder, tileLoc, nextGroup,
+                                           nullptr);
         gpu::BarrierOp::create(tileBuilder, tileLoc,
                                gpu::AddressSpace::Workgroup);
         scf::YieldOp::create(tileBuilder, tileLoc, next);
@@ -1170,7 +1213,7 @@ void emitConvolutionKernel(IRRewriter &rewriter,
               next[tile] = emitTensorCoreMma(
                   tileBuilder, tileLoc, sharedA, sharedB,
                   warpTiles[tile].localM, warpTiles[tile].localN, localKValue,
-                  laneId, next[tile]);
+                  laneId, Value(), next[tile]);
           }
           gpu::BarrierOp::create(tileBuilder, tileLoc,
                                  gpu::AddressSpace::Workgroup);
@@ -1265,6 +1308,68 @@ void emitBlockThreadMatmul(IRRewriter &rewriter, linalg::MatmulOp matmul) {
   rewriter.setInsertionPointAfter(blocks);
 }
 
+void emitBlockThreadBatchMatmul(IRRewriter &rewriter,
+                                linalg::BatchMatmulOp batchMatmul) {
+  Location loc = batchMatmul.getLoc();
+  Value lhs = batchMatmul.getDpsInputs()[0];
+  Value rhs = batchMatmul.getDpsInputs()[1];
+  Value output = batchMatmul.getDpsInits()[0];
+  Value zero = indexConstant(rewriter, loc, 0);
+  Value one = indexConstant(rewriter, loc, 1);
+  Value blockM = indexConstant(rewriter, loc, 8);
+  Value blockN = indexConstant(rewriter, loc, 32);
+  Value batchSize = memref::DimOp::create(rewriter, loc, output, 0);
+  Value mSize = memref::DimOp::create(rewriter, loc, output, 1);
+  Value nSize = memref::DimOp::create(rewriter, loc, output, 2);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 2);
+  auto blocks = scf::ParallelOp::create(
+      rewriter, loc, ValueRange{zero, zero, zero},
+      ValueRange{batchSize, mSize, nSize}, ValueRange{one, blockM, blockN},
+      [&](OpBuilder &blockBuilder, Location blockLoc, ValueRange blockIndices) {
+        scf::ParallelOp::create(
+            blockBuilder, blockLoc, ValueRange{zero, zero},
+            ValueRange{blockM, blockN}, ValueRange{one, one},
+            [&](OpBuilder &threadBuilder, Location threadLoc,
+                ValueRange threadIndices) {
+              Value row = arith::AddIOp::create(
+                  threadBuilder, threadLoc, blockIndices[1], threadIndices[0]);
+              Value column = arith::AddIOp::create(
+                  threadBuilder, threadLoc, blockIndices[2], threadIndices[1]);
+              Value condition = inBounds2D(threadBuilder, threadLoc, row, mSize,
+                                           column, nSize);
+              scf::IfOp::create(
+                  threadBuilder, threadLoc, condition,
+                  [&](OpBuilder &ifBuilder, Location ifLoc) {
+                    Value initial = memref::LoadOp::create(
+                        ifBuilder, ifLoc, output,
+                        ValueRange{blockIndices[0], row, column});
+                    auto reduction = scf::ForOp::create(
+                        ifBuilder, ifLoc, zero, kSize, one,
+                        ValueRange{initial},
+                        [&](OpBuilder &kBuilder, Location kLoc, Value k,
+                            ValueRange iterArgs) {
+                          Value lhsValue = memref::LoadOp::create(
+                              kBuilder, kLoc, lhs,
+                              ValueRange{blockIndices[0], row, k});
+                          Value rhsValue = memref::LoadOp::create(
+                              kBuilder, kLoc, rhs,
+                              ValueRange{blockIndices[0], k, column});
+                          Value product = arith::MulFOp::create(
+                              kBuilder, kLoc, lhsValue, rhsValue);
+                          Value sum = arith::AddFOp::create(
+                              kBuilder, kLoc, iterArgs[0], product);
+                          scf::YieldOp::create(kBuilder, kLoc, sum);
+                        });
+                    memref::StoreOp::create(
+                        ifBuilder, ifLoc, reduction.getResult(0), output,
+                        ValueRange{blockIndices[0], row, column});
+                    scf::YieldOp::create(ifBuilder, ifLoc);
+                  });
+            });
+      });
+  rewriter.setInsertionPointAfter(blocks);
+}
+
 func::FuncOp getOrCreateRuntimeFunction(ModuleOp module, OpBuilder &builder,
                                         StringRef name, FunctionType type) {
   if (auto function = module.lookupSymbol<func::FuncOp>(name))
@@ -1276,14 +1381,14 @@ func::FuncOp getOrCreateRuntimeFunction(ModuleOp module, OpBuilder &builder,
   return function;
 }
 
-Value buildAutotuneKey(OpBuilder &builder, Location loc, Value mSize,
-                       Value nSize, Value kSize) {
+Value buildAutotuneKey(OpBuilder &builder, Location loc, ValueRange dimensions,
+                       int64_t seed) {
   Type i64Type = builder.getI64Type();
-  Value hash = arith::ConstantIntOp::create(
-      builder, loc, i64Type, 0x434f4e5452414354LL);
+  Value hash =
+      arith::ConstantIntOp::create(builder, loc, i64Type, seed);
   Value multiplier =
       arith::ConstantIntOp::create(builder, loc, i64Type, 1099511628211LL);
-  for (Value dimension : {mSize, nSize, kSize}) {
+  for (Value dimension : dimensions) {
     Value cast = arith::IndexCastOp::create(builder, loc, i64Type, dimension);
     hash = arith::MulIOp::create(builder, loc, hash, multiplier);
     hash = arith::AddIOp::create(builder, loc, hash, cast);
@@ -1300,7 +1405,9 @@ void lowerAutotunedMatmul(IRRewriter &rewriter, ModuleOp module,
   Value mSize = memref::DimOp::create(rewriter, loc, output, 0);
   Value nSize = memref::DimOp::create(rewriter, loc, output, 1);
   Value kSize = memref::DimOp::create(rewriter, loc, lhs, 1);
-  Value key = buildAutotuneKey(rewriter, loc, mSize, nSize, kSize);
+  Value key = buildAutotuneKey(
+      rewriter, loc, ValueRange{mSize, nSize, kSize},
+      0x434f4e5452414354LL);
   Value candidateCount = arith::ConstantIntOp::create(
       rewriter, loc, rewriter.getI64Type(), 8);
   auto beginType = rewriter.getFunctionType(
@@ -1343,6 +1450,117 @@ void lowerAutotunedMatmul(IRRewriter &rewriter, ModuleOp module,
   rewriter.setInsertionPointAfter(dispatch);
   func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
   rewriter.eraseOp(matmul);
+}
+
+std::pair<func::FuncOp, func::FuncOp>
+getAutotuneRuntimeFunctions(ModuleOp module, OpBuilder &builder) {
+  auto beginType = builder.getFunctionType(
+      {builder.getI64Type(), builder.getI64Type()}, {builder.getIndexType()});
+  auto endType = builder.getFunctionType(
+      {builder.getI64Type(), builder.getIndexType()}, {});
+  return {getOrCreateRuntimeFunction(module, builder,
+                                     "tutorial_autotune_begin", beginType),
+          getOrCreateRuntimeFunction(module, builder, "tutorial_autotune_end",
+                                     endType)};
+}
+
+scf::IndexSwitchOp createAutotuneDispatch(OpBuilder &builder, Location loc,
+                                          Value candidate) {
+  SmallVector<int64_t> cases{0, 1, 2, 3, 4, 5, 6};
+  auto dispatch = scf::IndexSwitchOp::create(
+      builder, loc, TypeRange{}, candidate, cases, cases.size());
+  for (Region &region : dispatch->getRegions()) {
+    Block *block = builder.createBlock(&region);
+    builder.setInsertionPointToEnd(block);
+    scf::YieldOp::create(builder, loc);
+  }
+  return dispatch;
+}
+
+void lowerAutotunedBatchMatmul(IRRewriter &rewriter, ModuleOp module,
+                               linalg::BatchMatmulOp batchMatmul) {
+  Location loc = batchMatmul.getLoc();
+  Value lhs = batchMatmul.getDpsInputs()[0];
+  Value output = batchMatmul.getDpsInits()[0];
+  rewriter.setInsertionPoint(batchMatmul);
+  Value batch = memref::DimOp::create(rewriter, loc, output, 0);
+  Value mSize = memref::DimOp::create(rewriter, loc, output, 1);
+  Value nSize = memref::DimOp::create(rewriter, loc, output, 2);
+  Value kSize = memref::DimOp::create(rewriter, loc, lhs, 2);
+  Value key = buildAutotuneKey(
+      rewriter, loc, ValueRange{batch, mSize, nSize, kSize},
+      0x42415443484d4dLL);
+  Value count = arith::ConstantIntOp::create(
+      rewriter, loc, rewriter.getI64Type(), 8);
+  auto [begin, end] = getAutotuneRuntimeFunctions(module, rewriter);
+  Value candidate =
+      func::CallOp::create(rewriter, loc, begin, ValueRange{key, count})
+          .getResult(0);
+  auto dispatch = createAutotuneDispatch(rewriter, loc, candidate);
+  SmallVector<KernelConfig> profiles{
+      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
+      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
+      {128, 128, 16, 256, 4, 2}, {64, 128, 32, 256, 4, 2},
+      {128, 64, 32, 256, 4, 2}};
+  rewriter.setInsertionPoint(dispatch.getCaseBlock(0).getTerminator());
+  emitBlockThreadBatchMatmul(rewriter, batchMatmul);
+  for (size_t index = 0; index < profiles.size() - 1; ++index) {
+    rewriter.setInsertionPoint(
+        dispatch.getCaseBlock(static_cast<unsigned>(index + 1)).getTerminator());
+    emitSharedBatchMatmulKernel(rewriter, batchMatmul, profiles[index]);
+  }
+  rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
+  emitSharedBatchMatmulKernel(rewriter, batchMatmul, profiles.back());
+  rewriter.setInsertionPointAfter(dispatch);
+  func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
+  rewriter.eraseOp(batchMatmul);
+}
+
+void lowerAutotunedConvolution(IRRewriter &rewriter, ModuleOp module,
+                               linalg::Conv2DNchwFchwOp conv) {
+  Location loc = conv.getLoc();
+  Value input = conv.getDpsInputs()[0];
+  Value filter = conv.getDpsInputs()[1];
+  Value output = conv.getDpsInits()[0];
+  rewriter.setInsertionPoint(conv);
+  SmallVector<Value> dimensions;
+  for (int64_t dimension = 0; dimension < 4; ++dimension)
+    dimensions.push_back(
+        memref::DimOp::create(rewriter, loc, output, dimension));
+  for (int64_t dimension = 1; dimension < 4; ++dimension)
+    dimensions.push_back(
+        memref::DimOp::create(rewriter, loc, input, dimension));
+  dimensions.push_back(memref::DimOp::create(rewriter, loc, filter, 2));
+  dimensions.push_back(memref::DimOp::create(rewriter, loc, filter, 3));
+  auto strides = *getPositivePair(conv.getStrides());
+  auto dilations = *getPositivePair(conv.getDilations());
+  int64_t seed = 0x434f4e56474d4dLL ^ (strides[0] << 12) ^
+                 (strides[1] << 8) ^ (dilations[0] << 4) ^ dilations[1];
+  Value key = buildAutotuneKey(rewriter, loc, dimensions, seed);
+  Value count = arith::ConstantIntOp::create(
+      rewriter, loc, rewriter.getI64Type(), 8);
+  auto [begin, end] = getAutotuneRuntimeFunctions(module, rewriter);
+  Value candidate =
+      func::CallOp::create(rewriter, loc, begin, ValueRange{key, count})
+          .getResult(0);
+  auto dispatch = createAutotuneDispatch(rewriter, loc, candidate);
+  SmallVector<KernelConfig> profiles{
+      {64, 64, 16, 128, 4, 1},   {64, 128, 16, 256, 4, 1},
+      {128, 64, 16, 256, 4, 1},  {128, 128, 16, 256, 4, 1},
+      {64, 64, 32, 128, 4, 1},   {64, 128, 32, 256, 4, 1},
+      {128, 64, 32, 256, 4, 1},  {128, 128, 32, 256, 4, 1}};
+  for (size_t index = 0; index < profiles.size() - 1; ++index) {
+    rewriter.setInsertionPoint(
+        dispatch.getCaseBlock(static_cast<unsigned>(index)).getTerminator());
+    emitConvolutionKernel(rewriter, conv, profiles[index],
+                          /*tensorCore=*/false);
+  }
+  rewriter.setInsertionPoint(dispatch.getDefaultBlock().getTerminator());
+  emitConvolutionKernel(rewriter, conv, profiles.back(),
+                        /*tensorCore=*/false);
+  rewriter.setInsertionPointAfter(dispatch);
+  func::CallOp::create(rewriter, loc, end, ValueRange{key, candidate});
+  rewriter.eraseOp(conv);
 }
 
 } // namespace
@@ -1400,12 +1618,10 @@ void LowerContractionToGpuPass::runOnOperation() {
       batchWorklist.push_back(batchMatmul);
   });
   SmallVector<linalg::Conv2DNchwFchwOp> convolutionWorklist;
-  if (strategy != "autotuned") {
-    getOperation().walk([&](linalg::Conv2DNchwFchwOp conv) {
-      if (isSupportedConvolution(conv))
-        convolutionWorklist.push_back(conv);
-    });
-  }
+  getOperation().walk([&](linalg::Conv2DNchwFchwOp conv) {
+    if (isSupportedConvolution(conv))
+      convolutionWorklist.push_back(conv);
+  });
 
   IRRewriter rewriter(&getContext());
   for (linalg::MatmulOp matmul : worklist) {
@@ -1421,6 +1637,10 @@ void LowerContractionToGpuPass::runOnOperation() {
     rewriter.eraseOp(matmul);
   }
   for (linalg::BatchMatmulOp batchMatmul : batchWorklist) {
+    if (strategy == "autotuned") {
+      lowerAutotunedBatchMatmul(rewriter, getOperation(), batchMatmul);
+      continue;
+    }
     rewriter.setInsertionPoint(batchMatmul);
     if (strategy == "tensorcore-tf32")
       emitTensorCoreBatchMatmulKernel(rewriter, batchMatmul, config);
@@ -1429,6 +1649,10 @@ void LowerContractionToGpuPass::runOnOperation() {
     rewriter.eraseOp(batchMatmul);
   }
   for (linalg::Conv2DNchwFchwOp conv : convolutionWorklist) {
+    if (strategy == "autotuned") {
+      lowerAutotunedConvolution(rewriter, getOperation(), conv);
+      continue;
+    }
     rewriter.setInsertionPoint(conv);
     emitConvolutionKernel(rewriter, conv, config,
                           strategy == "tensorcore-tf32");

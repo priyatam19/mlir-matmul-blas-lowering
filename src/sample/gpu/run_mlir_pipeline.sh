@@ -78,7 +78,7 @@ case "${GPU_LOWERING}" in
   tensorcore-tf32)
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
-        --lower-contraction-to-gpu="strategy=tensorcore-tf32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=1" \
+        --lower-contraction-to-gpu="strategy=tensorcore-tf32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=${CONTRACTION_STAGES}" \
         -o "${BUFFERIZED_MLIR}"
     ;;
   autotuned)

@@ -16,8 +16,9 @@ if [[ "${GPU_LOWERING}" != "untiled" &&
       "${GPU_LOWERING}" != "block-thread" &&
       "${GPU_LOWERING}" != "shared-fp32" &&
       "${GPU_LOWERING}" != "tensorcore-tf32" &&
+      "${GPU_LOWERING}" != "autotuned" &&
       "${GPU_LOWERING}" != "vendor" ]]; then
-  echo "Batch matmul benchmarks support GPU_LOWERING=untiled, block-thread, shared-fp32, tensorcore-tf32, or vendor." >&2
+  echo "Batch matmul benchmarks support GPU_LOWERING=untiled, block-thread, shared-fp32, tensorcore-tf32, autotuned, or vendor." >&2
   exit 2
 fi
 
@@ -61,8 +62,13 @@ for shape in ${SHAPES}; do
     if [[ "${GPU_LOWERING}" == "vendor" ]]; then
       runtime=1
     fi
+    autotune_runtime=0
+    if [[ "${GPU_LOWERING}" == "autotuned" ]]; then
+      autotune_runtime=1
+    fi
     SAMPLE_CALL="${harness}" OUTPUT_BINARY="${binary}" LINK_CUBLAS=1 \
       LINK_TUTORIAL_GPU_RUNTIME="${runtime}" WRAP_MALLOC=0 \
+      LINK_TUTORIAL_AUTOTUNE_RUNTIME="${autotune_runtime}" \
       SAMPLE_OBJECT="${artifact_dir}/sample.o" \
       COMPILE_WORK_DIR="${artifact_dir}" bash compile.sh
   )

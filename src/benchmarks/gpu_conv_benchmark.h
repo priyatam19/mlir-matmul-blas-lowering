@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -73,6 +74,7 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
   const char *lowering = std::getenv("GPU_LOWERING");
   if (!lowering)
     lowering = "block-thread";
+  const bool tf32Mode = std::string(lowering) == "tensorcore-tf32";
 
   constexpr size_t inputElements = static_cast<size_t>(N) * C * H * W;
   constexpr size_t filterElements = static_cast<size_t>(F) * C * KH * KW;
@@ -149,8 +151,9 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
                      convolutionDescriptor, 0, 0, StrideH, StrideW, DilationH,
                      DilationW, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT),
                  "cudnnSetConvolution2dDescriptor");
-  checkConvCudnn(
-      cudnnSetConvolutionMathType(convolutionDescriptor, CUDNN_FMA_MATH),
+  checkConvCudnn(cudnnSetConvolutionMathType(
+                     convolutionDescriptor,
+                     tf32Mode ? CUDNN_TENSOR_OP_MATH : CUDNN_FMA_MATH),
       "cudnnSetConvolutionMathType");
 
   std::array<cudnnConvolutionFwdAlgoPerf_t, CUDNN_CONVOLUTION_FWD_ALGO_COUNT>
@@ -206,9 +209,11 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
 
   double maxAbsError = 0.0;
   double maxRelError = 0.0;
+  double squaredError = 0.0;
+  double squaredReference = 0.0;
   size_t mismatches = 0;
-  constexpr double absoluteTolerance = 5.0e-3;
-  constexpr double relativeTolerance = 2.0e-3;
+  const double absoluteTolerance = tf32Mode ? 1.0e-2 : 1.0e-4;
+  const double relativeTolerance = tf32Mode ? 1.0e-2 : 1.0e-4;
   for (size_t i = 0; i < outputElements; ++i) {
     double expected = referenceData[i];
     double actual = outputData[i];
@@ -216,22 +221,29 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
     double relativeError = absoluteError / std::max(std::abs(expected), 1.0e-6);
     maxAbsError = std::max(maxAbsError, absoluteError);
     maxRelError = std::max(maxRelError, relativeError);
+    squaredError += absoluteError * absoluteError;
+    squaredReference += expected * expected;
     if (!std::isfinite(actual) ||
         absoluteError >
             absoluteTolerance + relativeTolerance * std::abs(expected))
       ++mismatches;
   }
+  double relativeL2 =
+      std::sqrt(squaredError / std::max(squaredReference, 1.0e-30));
+  if (relativeL2 > (tf32Mode ? 5.0e-3 : 1.0e-5))
+    ++mismatches;
   if (mismatches != 0) {
     std::fprintf(stderr,
                  "%s correctness failed: mismatches=%zu max_abs=%.9g "
-                 "max_rel=%.9g\n",
-                 name, mismatches, maxAbsError, maxRelError);
+                 "max_rel=%.9g rel_l2=%.9g\n",
+                 name, mismatches, maxAbsError, maxRelError, relativeL2);
     return 2;
   }
 
   if (std::getenv("LAUNCH_CHECK_ONLY")) {
-    std::printf("launch_check,%s,%s,correct,max_abs=%.9g,max_rel=%.9g\n", name,
-                lowering, maxAbsError, maxRelError);
+    std::printf("launch_check,%s,%s,correct,max_abs=%.9g,max_rel=%.9g,"
+                "rel_l2=%.9g\n",
+                name, lowering, maxAbsError, maxRelError, relativeL2);
     return 0;
   }
 
@@ -284,17 +296,17 @@ int runGpuConvBenchmark(const char *name, CompiledConv compiledConv) {
 
   std::printf("kind,name,backend,n,c,h,w,f,kh,kw,oh,ow,stride_h,stride_w,"
               "dilation_h,dilation_w,threads,runs,p10_ms,p50_ms,p90_ms,"
-              "wall_p50_ms,gflops,max_abs,max_rel\n");
+              "wall_p50_ms,gflops,max_abs,max_rel,rel_l2\n");
   std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-              "%.9f,%.9f,%.9f,%.9f,%.3f,%.9g,%.9g\n",
+              "%.9f,%.9f,%.9f,%.9f,%.3f,%.9g,%.9g,%.9g\n",
               name, lowering, N, C, H, W, F, KH, KW, OH, OW, StrideH, StrideW,
               DilationH, DilationW, threads, runs, compiledStats.first.p10,
               compiledStats.first.p50, compiledStats.first.p90,
               compiledStats.second.p50, gflops(compiledStats.first.p50),
-              maxAbsError, maxRelError);
-  std::printf("result,%s,cudnn-fp32,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-              "0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0\n",
-              name, N, C, H, W, F, KH, KW, OH, OW, StrideH, StrideW, DilationH,
+              maxAbsError, maxRelError, relativeL2);
+  std::printf("result,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,0,%d,%.9f,%.9f,%.9f,%.9f,%.3f,0,0,0\n",
+              name, tf32Mode ? "cudnn-tf32" : "cudnn-pedantic-fp32", N, C,
+              H, W, F, KH, KW, OH, OW, StrideH, StrideW, DilationH,
               DilationW, runs, cudnnStats.first.p10, cudnnStats.first.p50,
               cudnnStats.first.p90, cudnnStats.second.p50,
               gflops(cudnnStats.first.p50));

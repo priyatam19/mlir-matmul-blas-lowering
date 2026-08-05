@@ -26,9 +26,14 @@ export LD_LIBRARY_PATH="${MLIR_BUILD_DIR}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PA
   if [[ "${GPU_LOWERING}" == "vendor" ]]; then
     runtime=1
   fi
+  autotune_runtime=0
+  if [[ "${GPU_LOWERING}" == "autotuned" ]]; then
+    autotune_runtime=1
+  fi
   SAMPLE_CALL="${HARNESS}" SAMPLE_OBJECT="${ARTIFACT_DIR}/sample.o" \
     COMPILE_WORK_DIR="${ARTIFACT_DIR}" OUTPUT_BINARY="${BINARY}" \
     LINK_TUTORIAL_GPU_RUNTIME="${runtime}" LINK_CUBLAS=1 WRAP_MALLOC=1 \
+    LINK_TUTORIAL_AUTOTUNE_RUNTIME="${autotune_runtime}" \
     bash compile.sh
 )
 
