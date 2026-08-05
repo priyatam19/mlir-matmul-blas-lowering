@@ -1,0 +1,4 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),GridXYZ,BlockXYZ,Name
+49.6,1289810,2,644905.0,644905.0,247741,1042069,561674.7,  34   16    1,   1    1    1,residual_conv_block_kernel
+49.2,1279986,5,255997.2,3136.0,3104,647513,346381.0,  32   16    1,   1    1    1,residual_conv_block_kernel
+1.2,31424,2,15712.0,15712.0,15648,15776,90.5,  64    1    1, 256    1    1,residual_conv_block_kernel

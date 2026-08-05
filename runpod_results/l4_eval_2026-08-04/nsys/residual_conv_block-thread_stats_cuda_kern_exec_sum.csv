@@ -1,0 +1,2 @@
+PID,TID,DevId,Count,QCount,TAvg (ns),TMed (ns),TMin (ns),TMax (ns),TStdDev (ns),AAvg (ns),AMed (ns),AMin (ns),AMax (ns),AStdDev (ns),QAvg (ns),QMed (ns),QMin (ns),QMax (ns),QStdDev (ns),KAvg (ns),KMed (ns),KMin (ns),KMax (ns),KStdDev (ns),API Name,Kernel Name
+9806,9806,0,9,7,300964.9,26116.0,10133,1074269,394426.4,11157.7,8810.0,6160,33959,8732.7,1546.7,1628.0,1072,2150,349.4,289024.4,15776.0,3104,1042069,387871.3,cuLaunchKernel,residual_conv_block_kernel

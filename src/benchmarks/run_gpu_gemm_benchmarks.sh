@@ -58,6 +58,11 @@ for shape in ${SHAPES}; do
       bash compile.sh
   )
 
+  if [[ "${BUILD_ONLY:-0}" == "1" ]]; then
+    echo "Built ${binary}" >&2
+    continue
+  fi
+
   if [[ "${CHECK_LAUNCHES:-0}" == "1" ]]; then
     launch_log="$(mktemp)"
     MLIR_CUDA_DEBUG=1 LAUNCH_CHECK_ONLY=1 GPU_LOWERING="${GPU_LOWERING}" \

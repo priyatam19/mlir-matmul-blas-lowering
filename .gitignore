@@ -29,7 +29,9 @@ build*/
 !src/benchmarks/gpu_gemm_mobilenet.mlir
 !src/benchmarks/gpu_gemm_irregular.mlir
 !src/benchmarks/gpu_bmm_*.mlir
+!src/benchmarks/gpu_conv_*.mlir
 !src/benchmarks/gpu_attention_block.mlir
+!src/benchmarks/gpu_residual_conv_block.mlir
 !src/benchmarks/resnet_conv.mlir
 !src/sample/gpu/sample_model_inputs_linalg.mlir
 !src/sample/gpu/sample_model_runtime_weights_linalg.mlir

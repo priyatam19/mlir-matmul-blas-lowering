@@ -1,0 +1,3 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),GridXYZ,BlockXYZ,Name
+88.8,310109,1,310109.0,310109.0,310109,310109,0.0,  16   64   12,  32    8    1,gpu_bmm_long_kernel
+11.2,39039,1,39039.0,39039.0,39039,39039,0.0,   4    4   12, 256    1    1,ampere_sgemm_128x128_nn

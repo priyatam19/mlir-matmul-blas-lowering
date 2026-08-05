@@ -82,7 +82,8 @@ The compiler environment generates the PyTorch reference; the separate
   generic attention kernels.
 - `check-mlir-tutorial` passes 9/9 tests.
 
-Runtime measurements remain pending until a new L4 pod is available. The
-custom long-attention kernel must beat generic lowering by at least 10x. Every
-vendor-lowered operator must remain within 5x of its direct cuBLAS p50, and all
-operator and attention outputs must pass full-output validation.
+The 2026-08-04 L4 run passed full-output validation and Compute Sanitizer. The
+long BMM improved from 21.816608 ms untiled to 0.317472 ms block-thread, a
+68.72x speedup. Its vendor path measured 0.045088 ms versus 0.042304 ms for
+direct cuBLAS. See [the unified L4 results](l4_evaluation_results.md) for every
+shape, mixed-attention measurements, tuning, and artifacts.

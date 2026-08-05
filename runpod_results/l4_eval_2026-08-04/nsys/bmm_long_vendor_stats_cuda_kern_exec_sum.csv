@@ -1,0 +1,2 @@
+PID,TID,DevId,Count,QCount,TAvg (ns),TMed (ns),TMin (ns),TMax (ns),TStdDev (ns),AAvg (ns),AMed (ns),AMin (ns),AMax (ns),AStdDev (ns),QAvg (ns),QMed (ns),QMin (ns),QMax (ns),QStdDev (ns),KAvg (ns),KMed (ns),KMin (ns),KMax (ns),KStdDev (ns),API Name,Kernel Name
+9228,9228,0,2,1,59993.0,59993.0,42552,77434,24665.3,23135.0,23135.0,5610,40660,24784.1,974.0,974.0,974,974,0.0,38592.0,38592.0,35968,41216,3710.9,cudaLaunchKernel,ampere_sgemm_128x128_nn
