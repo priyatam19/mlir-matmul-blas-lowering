@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""Runs `src/sample/model.py`'s `Sample` module three ways -- eager,
-`torch.compile` with the default Inductor backend, and `torch.compile` with
-this project's own `mlir_tutorial_backend` -- and checks all three agree.
+"""Runs `src/sample/model.py`'s `Sample` module four ways -- eager,
+`torch.compile` with the default Inductor backend, `torch.compile` with this
+project's own `mlir_tutorial_backend`, and a hand-written fused Triton kernel
+(`src/triton_kernels/fused_linear_clamp.py`) -- and checks all four agree.
 Then runs a second module with an op the MLIR backend doesn't recognize, to
 show the eager-fallback path actually firing.
+
+No single environment in this repo currently has both torch_mlir and
+triton+CUDA together (the torch-mlir-dev container has the former, this
+host's `dev/` venv has the latter, neither has a GPU), so the Triton path
+degrades gracefully to a clearly-labeled skip rather than failing the whole
+demo -- it will run for real once both are available together, e.g. on a
+RunPod/Colab GPU session with torch_mlir built the way the rest of this
+project already builds it there.
 
 Run inside the torch-mlir-dev container (needs torch_mlir + tutorial-opt):
     docker exec mlir-backend-dev python3 /workspace/project/src/torch_compile/demo.py
@@ -53,6 +62,40 @@ def supported_path_demo():
     torch.testing.assert_close(mlir_out, eager_out, rtol=1e-4, atol=1e-5)
     print("outputs match eager (inductor and mlir_tutorial both correct)")
 
+    return model, x, eager_out
+
+
+def triton_path_demo(model, x, eager_out):
+    print("\n=== Fourth comparison: hand-written fused Triton kernel ===")
+    triton_dir = str(Path(__file__).resolve().parents[1] / "triton_kernels")
+    if triton_dir not in sys.path:
+        sys.path.insert(0, triton_dir)
+
+    try:
+        from fused_linear_clamp import fused_linear_clamp
+    except SystemExit:
+        print("[triton] triton/torch not importable here -> skipped "
+              "(this container has torch_mlir but not triton; run this comparison "
+              "from an environment with both, e.g. a RunPod/Colab GPU session)")
+        return
+    if not torch.cuda.is_available():
+        print("[triton] no CUDA device in this environment -> skipped "
+              "(kernel correctness is verified separately, without a GPU, via "
+              "`TRITON_INTERPRET=1 python3 src/triton_kernels/fused_linear_clamp.py --interpret`)")
+        return
+
+    param = model.param.detach().cuda()
+    weight = model.linear.weight.detach().cuda()
+    bias = model.linear.bias.detach().cuda()
+
+    def run(x_arg):
+        return fused_linear_clamp(x_arg.cuda(), param, weight, bias).cpu()
+
+    triton_out, triton_t = _time_call(run, x)
+    torch.testing.assert_close(triton_out, eager_out, rtol=1e-3, atol=1e-4)
+    print(f"triton   : {triton_t * 1e6:8.2f} us/call")
+    print("output matches eager (hand-written fused Triton kernel correct)")
+
 
 class Unsupported(nn.Module):
     def forward(self, x):
@@ -70,5 +113,6 @@ def fallback_path_demo():
 
 
 if __name__ == "__main__":
-    supported_path_demo()
+    model, x, eager_out = supported_path_demo()
+    triton_path_demo(model, x, eager_out)
     fallback_path_demo()
