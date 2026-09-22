@@ -97,6 +97,15 @@ BLAS lowering. For this shape, the full input/output working set is much larger
 than the per-tile working set, so tiling improves locality enough to overcome
 the overhead of issuing multiple smaller BLAS calls.
 
+This single shape is the outlier, not the representative case. An ablation
+across four real-world shapes (`runpod_results/real_cpu_tiling_benchmarks.txt`,
+independently reproduced in
+[docs/cpu_matmul_blas_ablation.md](cpu_matmul_blas_ablation.md)) shows tiling
+consistently *hurting* by 9%-12% once BLAS is in the loop, because OpenBLAS
+already does its own internal cache blocking — the same ablation also
+isolates the BLAS-conversion pass itself as the dominant lever (41x-84x),
+with tiling's effect being noise-to-negative by comparison.
+
 ## Current Takeaways
 
 - The CPU/OpenBLAS path is functional and benefits from tiling on selected

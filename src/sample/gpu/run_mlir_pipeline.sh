@@ -14,6 +14,12 @@ GPU_MAPPING_POLICY="${GPU_MAPPING_POLICY:-innermost-first}"
 BLOCK_M="${BLOCK_M:-8}"
 BLOCK_N="${BLOCK_N:-32}"
 CONV_THREADS="${CONV_THREADS:-256}"
+CONTRACTION_BLOCK_M="${CONTRACTION_BLOCK_M:-64}"
+CONTRACTION_BLOCK_N="${CONTRACTION_BLOCK_N:-64}"
+CONTRACTION_BLOCK_K="${CONTRACTION_BLOCK_K:-16}"
+CONTRACTION_THREADS="${CONTRACTION_THREADS:-256}"
+CONTRACTION_STAGES="${CONTRACTION_STAGES:-1}"
+AUTOTUNE_MATH_MODE="${AUTOTUNE_MATH_MODE:-shared-fp32}"
 TILE_M="${TILE_M:-16}"
 TILE_N="${TILE_N:-16}"
 TILE_K="${TILE_K:-256}"
@@ -64,6 +70,24 @@ case "${GPU_LOWERING}" in
         --tile-conv2d-nchw-for-gpu="threads=${CONV_THREADS}" \
         -o "${BUFFERIZED_MLIR}"
     ;;
+  shared-fp32)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --lower-contraction-to-gpu="strategy=shared-fp32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=${CONTRACTION_STAGES}" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
+  tensorcore-tf32)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --lower-contraction-to-gpu="strategy=tensorcore-tf32 target=${CUDA_CHIP} block-m=${CONTRACTION_BLOCK_M} block-n=${CONTRACTION_BLOCK_N} block-k=${CONTRACTION_BLOCK_K} threads=${CONTRACTION_THREADS} vector-width=4 stages=${CONTRACTION_STAGES}" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
+  autotuned)
+    mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
+    | "${TUTORIAL_OPT}" \
+        --lower-contraction-to-gpu="strategy=autotuned target=${CUDA_CHIP} autotune-math-mode=${AUTOTUNE_MATH_MODE}" \
+        -o "${BUFFERIZED_MLIR}"
+    ;;
   vendor)
     mlir-opt "${MODEL_MLIR}" "${bufferize_common[@]}" \
     | "${TUTORIAL_OPT}" \
@@ -72,7 +96,7 @@ case "${GPU_LOWERING}" in
         -o "${BUFFERIZED_MLIR}"
     ;;
   *)
-    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, block-thread, or vendor." >&2
+    echo "Unknown GPU_LOWERING=${GPU_LOWERING}; expected legacy, untiled, block-thread, shared-fp32, tensorcore-tf32, autotuned, or vendor." >&2
     exit 2
     ;;
 esac
