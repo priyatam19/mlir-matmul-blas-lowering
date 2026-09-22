@@ -114,5 +114,29 @@ Strict FP32 uses `atol=rtol=1e-4` and relative L2 `<=1e-5`. TF32 uses
 `atol=rtol=1e-2` and relative L2 `<=5e-3` against matching-mode vendor
 libraries. TF32 CSV rows additionally report maximum absolute, maximum
 relative, and relative-L2 drift from a separate untimed pedantic-FP32 vendor
-reference. GPU performance numbers should only be added after this command is
-run on the L4; offline compilation is not a performance result.
+reference.
+
+## L4 Results (2026-09-22)
+
+Run for the first time on a dedicated NVIDIA L4 (driver `580.126.20`, CUDA
+12.8 toolkit, `sm_89`). Full methodology, two real bugs found and fixed on
+hardware, one known bug found but deliberately not fixed, and every raw CSV
+are in
+[l4_shared_memory_gpu_evaluation_2026-09-22.md](l4_shared_memory_gpu_evaluation_2026-09-22.md).
+Headline: this pass is a large, real improvement over the block-thread
+baseline, closing much of the remaining gap to vendor libraries — but not a
+finished result, since it's currently only validated on tile-aligned shapes.
+
+GFLOP/s as a percentage of the matching vendor reference (higher is better),
+p50 of 3 trials, tile-aligned shapes only (irregular/K-tail shapes excluded
+this run — see the linked report for why):
+
+| Shape family | block-thread (prior baseline) | shared-fp32 | autotuned | tensorcore-tf32 |
+|---|---:|---:|---:|---:|
+| GEMM (6 shapes, range) | 7.6%-39.1% | 24.8%-48.3% | 38.8%-50.8% | 13.1%-45.4% |
+| BMM bert / long / value | 36.8% / 12.4% / 35.0% | 67.9% / 36.6% / 54.8% | - | - |
+| Conv resnet-stem / resnet-block / pointwise | 21.8% / 11.8% / 93.8% | 42.9% / 18.3% / 221.4%\* | - | - |
+
+\*Beats cuDNN outright on this shape, consistent with the block-thread
+baseline's own note that dispatch overhead dominates cuDNN's advantage at
+small/pointwise sizes.
