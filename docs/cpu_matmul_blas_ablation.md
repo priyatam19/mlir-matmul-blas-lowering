@@ -184,7 +184,122 @@ blocking, operand packing, and hand-tuned microkernels are doing
 qualitatively more than a single level of cache tiling plus
 auto-vectorization can match. See "Next Steps" below.
 
+## Result 4: What's the ceiling? PyTorch eager vs. `torch.compile` (Inductor)
+
+Every run of `src/benchmarks/run_real_benchmarks.sh` in this repo's history
+has used `SKIP_PYTORCH=1` — the PyTorch reference point
+(`src/benchmarks/pytorch_bench.py`, same four shapes as everywhere else in
+this doc) has never actually been executed before. It was run for this
+section, and a new `src/benchmarks/pytorch_compile_bench.py` adds
+`torch.compile` (default Inductor backend) on top, both single-threaded
+(matching every other number in this doc) and at PyTorch's own default
+thread count (14 on this CPU).
+
+p50, nanoseconds:
+
+| Shape | Custom BLAS (notiled) | PyTorch eager, 1 thread | PyTorch eager, 14 threads | `torch.compile`, 1 thread |
+|---|---:|---:|---:|---:|
+| bert_attn | 47,879 | 22,375 | 8,875 | 35,253 |
+| resnet_conv | 263,235 | 155,239 | 49,543 | 170,035 |
+| gpt2_ffn | 424,161 | 303,057 | 93,012 | 322,228 |
+| large_gemm | 1,641,752 | 1,212,554 | 299,044 | 1,229,799 |
+| gemm2048 | 158,798,966 | 152,879,592 | 36,114,037 | 152,977,525 |
+
+Three findings, in order of how surprising they are:
+
+1. **`torch.compile`'s default backend does not help a bare matmul — it's
+   1.00x-1.58x *slower* than eager**, worse the smaller the shape. This
+   isn't a bug or a bad measurement: Inductor's value proposition is fusing
+   *multiple* ops in a graph (eliminating intermediate materializations,
+   fewer kernel launches). A lone `torch.matmul` has nothing to fuse —
+   Inductor recognizes it as an "extern kernel" and calls out to the exact
+   same ATen/BLAS implementation eager already calls, just with dispatch
+   and guard overhead wrapped around it. So the "advanced backend" isn't
+   doing anything smarter at the GEMM kernel level here; GEMM was never
+   Inductor's kernel to begin with, in either mode. (Inductor's fusion
+   advantage should show up on the *mixed* programs — attention block,
+   residual conv — the same way it evidently doesn't on isolated GEMM;
+   worth testing separately if useful.)
+2. **PyTorch eager, at the same 1-thread constraint as everything else in
+   this doc, is already 1.35x-2.14x faster than this project's custom
+   BLAS-converted pipeline**, largest gap at the smallest shape. This is a
+   *BLAS quality* gap, not a codegen gap: this PyTorch wheel links a
+   better-tuned BLAS/oneDNN build than the generic `libopenblas-dev` apt
+   package installed for this investigation (Results 1-3). Same lever
+   category as "stop tiling before BLAS" from Result 3 — it's about which
+   library gets called, not what MLIR generates.
+3. **Multi-threading, confirmed as the single largest lever** (this doc's
+   Next Steps previously listed it as untested/predicted-largest): going
+   from 1 to 14 threads is worth 2.52x-4.23x on eager PyTorch alone, growing
+   with problem size. Combined with (2), **PyTorch eager at its own default
+   thread count is 4.4x-5.5x faster than this project's custom pipeline's
+   best result (BLAS, notiled) at every shape tested** — using nothing more
+   exotic than the ordinary multi-threaded BLAS call PyTorch already makes
+   by default. That is the realistic ceiling on this hardware for a bare
+   GEMM, and neither MLIR-level tiling nor `torch.compile` gets there;
+   linking a better BLAS and actually using more than one thread does.
+
+## Result 5: Does tiling really help at a scale multifold past every cache level, and does targeting L1 specifically matter?
+
+Result 3's 2048^3 case (48 MB, ~2x the 24 MB L3) used a tile
+(`128x128x256`, 320 KB of A+B+C) sized for the 1.25 MB **L2**, not L1. This
+result goes further on both axes: `4096x4096x4096` (~64 MB per matrix,
+~192 MB total working set — **8x** the L3, an unambiguous multifold-over-cache
+case), and a second tile config explicitly sized for the 48 KB **L1**.
+
+L1 sizing: for three square tiles of side `T` in fp32,
+`3 * T^2 * 4 bytes <= 48 KB` gives `T <= 64` at the exact boundary (no
+margin for anything else L1 holds — loop counters, spills). `tile-m=32
+tile-n=32 tile-k=32` gives `3 * 32^2 * 4 = 12 KB`, a comfortable 25% of L1.
+4096 divides evenly by both 32 and 128, so neither tiling needs tail
+handling. 1 warmup + 2 timed calls per variant (each call is
+30 s-12 min at this scale; variance between the 2 timed calls was under
+0.3% for every variant, so 2 was enough to trust).
+
+p50, and GFLOP/s (`2*4096^3 = 137.4 GFLOP`):
+
+| Variant | BLAS | no-BLAS (native+fastmath) |
+|---|---:|---:|
+| untiled | 1.234 s (111.4 GFLOP/s) | 710.9 s (0.19 GFLOP/s) |
+| L2-tile (320 KB) | 1.523 s (90.2 GFLOP/s), **+23.4%** | 70.1 s (1.96 GFLOP/s), **10.1x faster** |
+| L1-tile (12 KB) | 2.628 s (52.3 GFLOP/s), **+112.9%** | 9.0 s (15.24 GFLOP/s), **78.9x faster** |
+
+The two paths point in exactly opposite directions as the tile gets
+smaller, and both are consistent with everything established so far:
+
+- **With BLAS, smaller tiles are strictly worse, and get worse faster than
+  at 2048^3.** L1-sized tiling means ~2.1 million separate `cblas_sgemm`
+  calls (`(4096/32)^3`); at that call count, per-call overhead alone
+  (parameter marshalling, BLAS-internal setup) dominates real compute.
+  OpenBLAS already blocks internally — chopping its input into pieces this
+  small only adds call-count tax with no locality benefit it didn't already
+  have.
+- **Without BLAS, smaller (properly cache-matched) tiles are dramatically
+  better, and fitting the *fastest* cache level, not just *a* cache level,
+  is most of the win.** Going from no tiling to an L2-fit tile is a real
+  10.1x; going one step further, from L2-fit to L1-fit, is another 7.8x on
+  top of that — nearly as large a jump as the first one. This is the clean,
+  unambiguous "yes, tiling helps" result Result 3 pointed at but didn't
+  fully demonstrate: it needed both a scale that actually exceeds every
+  cache level (not just barely past L2, as the smaller real-world shapes
+  and even 2048^3's own working set mostly were) and a tile matched to the
+  cache level that actually matters most for reuse.
+
+For scale: even the best custom result here (L1-tile, no-BLAS,
+15.24 GFLOP/s) remains ~7.3x slower than plain untiled BLAS
+(111.4 GFLOP/s) — this is evidence that *tiling itself* is a large,
+real, correctly-targeted lever, not evidence that this custom pipeline
+has caught up to a vendor BLAS. It hasn't; see Result 4 for how large
+that remaining gap (and the threading/BLAS-choice gap on top of it) still
+is.
+
 ## Next Steps
+
+Result 5's 78.9x is scale-dependent, not a general property of tiling: it
+only shows up once the problem genuinely exceeds every cache level. None of
+Result 1's real-world shapes (128 KB-2 MB working sets) are anywhere near
+that regime, which is exactly why tiling looked irrelevant there and
+decisive here — same pass, same mechanism, different scale.
 
 Ranked by expected impact for effort:
 
@@ -232,14 +347,27 @@ Ranked by expected impact for effort:
 3. **Add packing to `TileMatMulForCache`'s output**, if pursuing the
    no-BLAS path further. It currently narrows loop bounds over the
    *original* strided layout rather than copying each tile into a
-   contiguous scratch buffer the way BLIS/OpenBLAS do — some of the
-   remaining 55x gap to BLAS is almost certainly non-contiguous/TLB
-   overhead this would remove. Larger lift than (1).
-4. **Multi-threading — untested, likely the single biggest remaining
-   lever, and orthogonal to all of the above.** Every measurement in this
-   entire investigation, including the original project benchmarks, pins
-   `OPENBLAS_NUM_THREADS=1` for fairness. This CPU has 14 cores; nothing
-   measured here has used more than one.
+   contiguous scratch buffer the way BLIS/OpenBLAS do. Result 5 shows this
+   isn't necessary for cache-matched tiling to work — 78.9x without
+   packing — but it's the next lever on top of that, and likely explains
+   most of why L1-tile+no-BLAS (15.2 GFLOP/s) still trails untiled BLAS
+   (111.4 GFLOP/s) by ~7.3x at the same scale.
+4. **Multi-threading — confirmed the single biggest lever (Result 4:
+   2.52x-4.23x, growing with problem size), still untried in this custom
+   pipeline.** Every MLIR-side measurement in this investigation pins
+   `OPENBLAS_NUM_THREADS=1`/1 thread for fairness; nothing produced by this
+   project's own passes has ever used more than one.
+5. **Link a better BLAS.** Result 4 shows PyTorch's own linked
+   BLAS/oneDNN beats the generic `libopenblas-dev` apt package by
+   1.35x-2.14x single-threaded, on identical hardware and identical
+   `cblas_sgemm`-shaped calls. This is a build/link-time choice, not an
+   MLIR change, and it's free.
+6. **`torch.compile`'s default backend is not a shortcut past any of
+   this.** Result 4 shows it adds overhead over eager for an isolated
+   matmul rather than helping — it has nothing to fuse. It may still be a
+   useful ceiling reference for *mixed* programs (attention block,
+   residual conv), where its fusion story is actually applicable; untested
+   here.
 
 ## Reproduction
 
