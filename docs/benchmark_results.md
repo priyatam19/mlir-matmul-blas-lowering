@@ -97,10 +97,29 @@ BLAS lowering. For this shape, the full input/output working set is much larger
 than the per-tile working set, so tiling improves locality enough to overcome
 the overhead of issuing multiple smaller BLAS calls.
 
+This single shape is the outlier, not the representative case, and **tiling
+before BLAS is not recommended** — do not chain `--tile-matmul-for-cache`
+into `--convert-matmul-to-blas`. An ablation across four real-world shapes
+(`runpod_results/real_cpu_tiling_benchmarks.txt`, independently reproduced
+in [docs/cpu_matmul_blas_ablation.md](cpu_matmul_blas_ablation.md)) shows
+tiling consistently *hurting* once BLAS is in the loop — 9%-12% at these
+shapes, growing to +18.7%-+112.9% at larger scales tested there — because
+OpenBLAS already does its own internal cache blocking, and chopping its
+input into smaller external calls only adds call overhead with no benefit.
+
+Tiling is not useless, though: on the *generic, non-BLAS* fallback path
+(irrelevant to this OpenBLAS chapter, but see
+[docs/cpu_matmul_blas_ablation.md](cpu_matmul_blas_ablation.md) Result 5),
+the same pass is the single largest lever measured in this project once the
+problem is scaled well past every cache level and the tile is sized to
+match — up to 78.9x. The two paths point in opposite directions on tile
+size for a structural reason (call-count overhead vs. cache locality), not
+a contradiction.
+
 ## Current Takeaways
 
-- The CPU/OpenBLAS path is functional and benefits from tiling on selected
-  real model shapes.
+- The CPU/OpenBLAS path is functional. Tiling with `--tile-matmul-for-cache`
+  should **not** be chained before it — see above.
 - The CUDA path now links and launches correctly for runtime-weight MLIR models.
 - GPU acceleration is clearly valuable for large GEMM when using a tuned kernel
   such as cuBLAS.

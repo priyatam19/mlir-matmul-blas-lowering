@@ -2,6 +2,8 @@ add_mlir_library(ConvertMatMulToBlas
     ConvertBatchMatMulToCublas.cpp
     ConvertConv2DNchwToCudnn.cpp
     ConvertMatMulToBlas.cpp
+    EnableFastMathForLoops.cpp
+    PackTiledMatmulOperands.cpp
     TileBatchMatMulForGpu.cpp
     TileConv2DNchwForGpu.cpp
     TileMatMulForCache.cpp
