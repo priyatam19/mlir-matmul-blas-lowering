@@ -53,6 +53,8 @@ for shape in ${SHAPES}; do
     model="${PROJ}/src/benchmarks/gpu_gemm_512_legacy.mlir"
   fi
   harness="${PROJ}/src/benchmarks/${harnesses[${shape}]}"
+  artifact_dir="${BUILD}/benchmark-artifacts/${shape}_${GPU_LOWERING}_${BLOCK_M}x${BLOCK_N}"
+  mkdir -p "${artifact_dir}"
   binary="${PROJ}/src/sample/gpu/${shape}_${GPU_LOWERING}_${BLOCK_M}x${BLOCK_N}.out"
 
   echo "Building ${shape}: lowering=${GPU_LOWERING} block=${BLOCK_M}x${BLOCK_N}" >&2
@@ -61,6 +63,7 @@ for shape in ${SHAPES}; do
     MODEL_MLIR="${model}" GPU_LOWERING="${GPU_LOWERING}" \
       BLOCK_M="${BLOCK_M}" BLOCK_N="${BLOCK_N}" \
       CUDA_CHIP="${CUDA_CHIP}" CUDA_PTX_FEATURE="${CUDA_PTX_FEATURE}" \
+      OUTPUT_DIR="${artifact_dir}" \
       bash run_mlir_pipeline.sh
     autotune_runtime=0
     if [[ "${GPU_LOWERING}" == "autotuned" ]]; then
@@ -68,7 +71,8 @@ for shape in ${SHAPES}; do
     fi
     SAMPLE_CALL="${harness}" OUTPUT_BINARY="${binary}" LINK_CUBLAS=1 WRAP_MALLOC=0 \
       LINK_TUTORIAL_AUTOTUNE_RUNTIME="${autotune_runtime}" \
-      bash compile.sh
+      SAMPLE_OBJECT="${artifact_dir}/sample.o" \
+      COMPILE_WORK_DIR="${artifact_dir}" bash compile.sh
   )
 
   if [[ "${BUILD_ONLY:-0}" == "1" ]]; then
