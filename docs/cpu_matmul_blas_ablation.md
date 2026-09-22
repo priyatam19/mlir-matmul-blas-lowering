@@ -293,6 +293,71 @@ has caught up to a vendor BLAS. It hasn't; see Result 4 for how large
 that remaining gap (and the threading/BLAS-choice gap on top of it) still
 is.
 
+## Result 6: Does packing close more of the gap?
+
+Result 5 flagged that even the best custom result (L1-tile, no-BLAS,
+15.24 GFLOP/s) trails untiled BLAS by ~7.3x, and attributed part of that to
+`--tile-matmul-for-cache` narrowing loop bounds over the *original* strided
+matrix rather than packing each tile into contiguous memory the way
+BLIS/OpenBLAS do internally. This tests that directly: a new
+`--pack-tiled-matmul-operands` pass, run after `--tile-matmul-for-cache` and
+`--linalg-to-bufferization`, copies each tile's A/B operands into a fresh
+contiguous buffer before the tile's `linalg.matmul` runs (C is left as-is;
+it's written once per position, not the reuse-heavy operand).
+
+**Two implementation attempts, both instructive.** The first tried to do
+this at the *tensor* level, as a `pack=true` option directly inside
+`--tile-matmul-for-cache`, using `bufferization.alloc_tensor` +
+`tensor.insert_slice` right where each `tensor.extract_slice` tile was
+produced. It compiled, ran, and produced correct output — but One-Shot
+Bufferize recognized the copy as a same-size, zero-offset, unit-stride
+tensor materialization (semantically a no-op) and **optimized it away
+entirely**, silently leaving the original strided `memref.subview` in
+place. The generated IR had zero extra buffers; the "packed" binary was
+byte-for-byte the same computation as the unpacked one, and the ~3.5%
+timing difference first measured was just noise, not a real effect. Lesson:
+tensor-level "pack" attempts are subject to bufferization's own redundant-copy
+elimination and can silently do nothing — verify by reading the bufferized
+IR, not just by timing.
+
+The second attempt moved packing to a **separate pass running after
+bufferization** (`lib/PackTiledMatmulOperands.cpp`), operating directly on
+`memref.subview` inputs to `linalg.matmul` — no tensor-level dataflow
+analysis left at that point to see through it. This surfaced two more
+issues before it worked: `memref.copy` lowers to a runtime call
+(`memrefCopy`) this project's CPU path isn't linked against, and — more
+importantly — a `memref.alloca` placed at the tile's own site, inside three
+nested nested `scf.for` loops, is not hoisted by the backend across
+iterations here; at cache-exceeding scale that's millions of stack frames
+that are never popped, and it **segfaults from stack overflow** on the
+first call. The fix for both: hand-roll the copy as an explicit
+`scf.for`/`scf.for` load-store loop (avoids the runtime dependency, stays
+inlinable and vectorizable), and explicitly hoist the `memref.alloca` to
+just before the outermost enclosing `scf.for` so one buffer is allocated
+once and reused every iteration — the same shape a real microkernel's
+scratch space takes. Ragged-tail tiles (dynamic size, can't be computed
+before the loop producing them exists) fall back to allocating at the
+matmul's own site; every shape benchmarked in this document divides evenly
+and never hits that path.
+
+Correctness re-verified against the BLAS reference (checksum
+`2671.086102` vs. `2671.086106`, FP32 rounding only) before trusting the
+timing:
+
+| Variant | p50 | GFLOP/s | vs. L1-tile w/o packing |
+|---|---:|---:|---:|
+| L1-tile, no packing (Result 5) | 9.018 s | 15.24 | — |
+| L1-tile, **packed** | 5.452 s | 25.21 | **1.65x faster** |
+
+Packing is a real, meaningful win on top of tiling — not a wash like the
+first (silently-eliminated) attempt suggested. Stacked with tiling itself,
+packed+tiled is now 130.4x faster than untiled (up from 78.9x), and closes
+some more of the remaining gap to BLAS: 34.3x slower than untiled BLAS, down
+from 55.4x. BLAS is still doing substantially more — multi-level (not just
+single-level) blocking, SIMD-width-aware micro-kernels, and everything
+Result 4 already covers — but packing alone recovered a genuine third of
+the log-scale distance this specific lever had left on the table.
+
 ## Next Steps
 
 Result 5's 78.9x is scale-dependent, not a general property of tiling: it
@@ -340,18 +405,14 @@ Ranked by expected impact for effort:
    pass); use `clang -x ir -O3 -march=native -c` (or `opt -O3` before
    `llc`) to actually exercise it, or the fastmath fix will look like it's
    not working when it is.
-2. **Stop tiling before BLAS.** Confirmed harmful at every scale tested,
-   and the harm grows with scale (Result 3). `TileMatMulForCache` and
-   `ConvertMatmulToBlasLibraryCallPass` should not be recommended together;
-   `docs/benchmark_results.md`/Chapter 5 should be updated accordingly.
-3. **Add packing to `TileMatMulForCache`'s output**, if pursuing the
-   no-BLAS path further. It currently narrows loop bounds over the
-   *original* strided layout rather than copying each tile into a
-   contiguous scratch buffer the way BLIS/OpenBLAS do. Result 5 shows this
-   isn't necessary for cache-matched tiling to work — 78.9x without
-   packing — but it's the next lever on top of that, and likely explains
-   most of why L1-tile+no-BLAS (15.2 GFLOP/s) still trails untiled BLAS
-   (111.4 GFLOP/s) by ~7.3x at the same scale.
+2. **Stop tiling before BLAS. Done.** `docs/benchmark_results.md` no longer
+   recommends chaining `--tile-matmul-for-cache` into
+   `--convert-matmul-to-blas`.
+3. **Add packing on top of tiling for the no-BLAS path. Done (Result 6)** —
+   a real 1.65x on top of tiling's own 78.9x (130.4x total vs. untiled),
+   via a new `--pack-tiled-matmul-operands` pass
+   (`lib/PackTiledMatmulOperands.cpp`). Remaining gap to untiled BLAS is
+   now 34.3x, down from 55.4x.
 4. **Multi-threading — confirmed the single biggest lever (Result 4:
    2.52x-4.23x, growing with problem size), still untried in this custom
    pipeline.** Every MLIR-side measurement in this investigation pins

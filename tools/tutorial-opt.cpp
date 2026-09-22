@@ -2,6 +2,7 @@
 #include "lib/ConvertConv2DNchwToCudnn.h"
 #include "lib/ConvertMatMulToBlas.h"
 #include "lib/EnableFastMathForLoops.h"
+#include "lib/PackTiledMatmulOperands.h"
 #include "lib/TileBatchMatMulForGpu.h"
 #include "lib/TileConv2DNchwForGpu.h"
 #include "lib/TileMatMulForCache.h"
@@ -141,6 +142,7 @@ int main(int argc, char **argv) {
   mlir::PassRegistration<mlir::tutorial::TileConv2DNchwForGpuPass>();
   mlir::PassRegistration<mlir::tutorial::TileMatMulForGpuPass>();
   mlir::PassRegistration<mlir::tutorial::EnableFastMathForLoopsPass>();
+  mlir::PassRegistration<mlir::tutorial::PackTiledMatmulOperandsPass>();
 
   mlir::PassPipelineRegistration<>(
       "linalg-to-bufferization",
