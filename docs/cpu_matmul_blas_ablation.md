@@ -358,6 +358,85 @@ single-level) blocking, SIMD-width-aware micro-kernels, and everything
 Result 4 already covers — but packing alone recovered a genuine third of
 the log-scale distance this specific lever had left on the table.
 
+## Result 7: Multi-threading, in isolation
+
+Every MLIR-side measurement in this document through Result 6 is
+single-threaded — this tests the one remaining lever flagged as untried:
+OpenMP-parallelizing the M/N loops (K stays sequential; it's the
+reduction). This uses only pre-existing, well-tested upstream MLIR passes
+(`-convert-linalg-to-parallel-loops`, `-convert-scf-to-openmp`,
+`-convert-openmp-to-llvm`) — no new pass was written for this one.
+
+**What didn't work first, and why it's informative.** The natural thing to
+try was combining this with tiling: add a `parallel=true` option to
+`TileMatMulForCache` switching `linalg::tileLinalgOp`'s
+`LinalgTilingLoopType` from `Loops` to the existing `ParallelLoops` value,
+so the M/N tile loops become `scf.parallel` directly. This **segfaults in
+MLIR's own verifier** (`verifyOpAndDominance`) on IR `tileLinalgOp` itself
+produced — a structural bug in this specific LLVM/MLIR `23.1.1` dev
+snapshot's `ParallelLoops` code path, not in any code this project wrote;
+the far more common `Loops` path (what every other result in this document
+uses) is unaffected. Given three separate crashes in less-common API/option
+paths in this build already (Result 6's two failed packing attempts), this
+was not pursued further — see Next Steps.
+
+**What worked: parallelizing a plain (untiled) matmul.** Two more toolchain
+issues surfaced getting there, both fixed, both worth recording:
+- `-convert-scf-to-cf`, applied *after* `-convert-scf-to-openmp`, converts
+  the sequential K-reduction `scf.for` left nested inside
+  `memref.alloca_scope` into unstructured control flow — which
+  `alloca_scope`'s own verifier rejects (`expects region #0 to have 0 or 1
+  blocks`), even though a *later* pass in the very same pipeline
+  (`-finalize-memref-to-llvm`) fully resolves it. `mlir-opt`'s default
+  `--verify-each=true` rejects this transient intermediate state before
+  the pipeline ever reaches that later pass. Fixed with
+  `--verify-each=false` for this one pipeline; the final IR verifies fine.
+- `clang -fopenmp` generates calls to the LLVM/Intel OpenMP runtime ABI
+  (`__kmpc_*`); linking that object code with system `g++` (GCC's
+  `libgomp`) fails with undefined references — GCC's OpenMP runtime does
+  not implement that ABI. Linking with the LPTA toolchain's own `clang++`
+  instead resolves it, pulling in `libomp.so`, which then needs
+  `LD_LIBRARY_PATH` set at run time since it isn't on the system's default
+  linker search path.
+
+Correctness re-verified against the BLAS reference (checksum `2671.086102`
+vs. `2671.086106`) at both 1 and 4 threads before trusting the timing.
+
+4096x4096x4096, p50, 1 warmup + 3 timed calls:
+
+| Threads | p50 | GFLOP/s | vs. 1 thread |
+|---|---:|---:|---:|
+| 1 (Result 5's `notiled_native`) | 710.943 s | 0.19 | — |
+| 14 (physical cores) | 47.093 s | 2.92 | **15.10x** |
+| 20 (with SMT/hyperthreading) | 48.582 s | 2.83 | 15.10x/1.032 (3.2% *worse* than 14) |
+
+15.10x on 14 threads is mildly super-linear, which is plausible but not
+fully pinned down here: splitting the M range 14 ways also means each
+thread's slice touches less of the matrix, which can incidentally reduce
+cache/TLB pressure the same way tiling does — but the single-thread
+baseline was measured earlier in this session under potentially different
+thermal/frequency conditions (this machine's `cpupower` reports frequency
+scaling active), so treat the exact multiplier as directionally right, not
+a tightly controlled ratio. 20 threads being *slower* than 14 matches
+expectation: compute-bound FP32 work doesn't benefit from SMT sharing a
+physical core's execution units, and sometimes loses a little to the
+contention.
+
+**Left undone, honestly:** this measures threading in isolation on an
+*untiled* matmul, not stacked on top of Result 6's tiled+packed result
+(5.452 s single-threaded, this document's best non-BLAS number) — that
+combination is exactly what hit the `ParallelLoops` crash above.
+Extrapolating "5.452s / ~15x" is tempting but unverified; do not treat it
+as a real number until it's actually measured, e.g. by manually converting
+just the outermost `scf.for` M-tile loop from the `Loops`-mode tiling
+output to `scf.parallel` (working around `tileLinalgOp`'s own broken
+`ParallelLoops` path) rather than requesting it as a builtin option. This
+document's own numbers were also never compared against
+multi-threaded BLAS (`OPENBLAS_NUM_THREADS>1`) — every BLAS number in
+Results 1, 3, 5, and 6 is single-threaded, so "296.6x slower than BLAS" for
+the 14-thread result here is comparing threaded-custom against
+single-threaded-BLAS, not a fair fight either.
+
 ## Next Steps
 
 Result 5's 78.9x is scale-dependent, not a general property of tiling: it
@@ -413,11 +492,17 @@ Ranked by expected impact for effort:
    via a new `--pack-tiled-matmul-operands` pass
    (`lib/PackTiledMatmulOperands.cpp`). Remaining gap to untiled BLAS is
    now 34.3x, down from 55.4x.
-4. **Multi-threading — confirmed the single biggest lever (Result 4:
-   2.52x-4.23x, growing with problem size), still untried in this custom
-   pipeline.** Every MLIR-side measurement in this investigation pins
-   `OPENBLAS_NUM_THREADS=1`/1 thread for fairness; nothing produced by this
-   project's own passes has ever used more than one.
+4. **Multi-threading — confirmed the single biggest individual lever
+   (Result 7: 15.1x on 14 threads), measured in isolation on an untiled
+   matmul, using only upstream MLIR passes (no new code).** Not yet
+   stacked on top of Result 6's tiled+packed result — that combination
+   hit a genuine bug in this MLIR build's `LinalgTilingLoopType::
+   ParallelLoops` path (crashes in the verifier on IR `tileLinalgOp`
+   itself produces). Manually converting just the outermost tile loop to
+   `scf.parallel`, bypassing that broken option, is the concrete next
+   step. Also not yet compared against multi-threaded BLAS
+   (`OPENBLAS_NUM_THREADS>1`) — every BLAS number in this document is
+   single-threaded.
 5. **Link a better BLAS.** Result 4 shows PyTorch's own linked
    BLAS/oneDNN beats the generic `libopenblas-dev` apt package by
    1.35x-2.14x single-threaded, on identical hardware and identical
