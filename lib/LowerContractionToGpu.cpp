@@ -23,7 +23,19 @@ struct KernelConfig {
 int64_t sharedBColumns(const KernelConfig &config) {
   // Padding rotates K rows across banks; 32-wide K tiles retain the exact
   // 48 KiB two-stage profile budget.
-  return config.blockN + (config.blockK == 16 ? 1 : 0);
+  //
+  // Skipped for stages==2: nvgpu.device_async_copy (cp.async.128, the
+  // two-stage path's transfer instruction) requires its shared-memory
+  // destination to be 16-byte aligned, and hardware-faults with
+  // CUDA_ERROR_MISALIGNED_ADDRESS if it isn't -- unlike vector.load/
+  // vector.store (the stages==1 path), which the compiler can silently
+  // split into smaller aligned accesses when it can't prove alignment.
+  // blockN + 1 (fp32 columns) makes each row's byte offset non-multiple-
+  // of-16 for every blockN tested here (64, 128, ... i.e. blockN % 4 == 0,
+  // so blockN + 1 is never itself a multiple of 4), so the padded layout
+  // is only safe for the stages==1 vectorized-but-synchronous path.
+  bool padForBankConflicts = config.blockK == 16 && config.stages != 2;
+  return config.blockN + (padForBankConflicts ? 1 : 0);
 }
 
 int64_t estimateRegistersPerThread(const KernelConfig &config,
