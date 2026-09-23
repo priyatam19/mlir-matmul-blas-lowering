@@ -143,8 +143,12 @@ Percentages are share of the matching vendor reference (pedantic-FP32 for
 block-thread/shared-fp32/autotuned-fp32, TF32 for tensorcore-tf32).
 `autotuned` beats plain `shared-fp32` everywhere (as it should — it's
 selecting the best of several `shared-fp32`-family candidates), and both
-beat `block-thread` by a wide margin: **shared-fp32 is 2.9x-4.7x block-thread's
-GFLOP/s** across these six shapes; **autotuned is 4.2x-7.7x**.
+beat `block-thread` on every GEMM shape: **shared-fp32 is 1.4x-4.0x
+block-thread's GFLOP/s** across these six shapes (1.4x mobilenet, 1.9x 512,
+3.3x tall/wide, 3.8x 2048, 4.0x 1024); **autotuned is 1.2x-5.6x** (its
+smallest gain, 1.2x, is mobilenet, where it is actually slower than plain
+`shared-fp32`; its largest, 5.6x, is 2048). The large gains are on the large
+shapes; the small mobilenet shape gains little.
 `tensorcore-tf32` closes less of its (much larger) gap to `cublas-tf32` than
 the FP32 strategies do — cuBLAS's TF32 path is dramatically faster than its
 FP32 path (2x-2.8x, real tensor-core throughput), while this project's
@@ -174,9 +178,13 @@ is working correctly.
 | resnet-block | 819 (11.8%) | 1276 (18.3%) | 6921 (98.4%) | 7035 |
 | pointwise | 672 (93.8%) | 1585 (221.4%) | 700 (97.7%) | 716 |
 
-`shared-fp32` roughly doubles `resnet-stem`'s and `resnet-block`'s
-vendor-relative share over `block-thread`, and turns `pointwise` from
-slightly behind cuDNN into beating it 2.2x. `small` and `pointwise` beating
+`shared-fp32` improves `resnet-stem` 2.0x and `resnet-block` 1.6x over
+`block-thread` (vendor-relative share 21.8% -> 42.9% and 11.8% -> 18.3%),
+and turns `pointwise` from slightly behind cuDNN into beating it 2.2x
+(2.4x over block-thread). It is **not** uniformly better: `small` is ~11%
+slower under `shared-fp32` than under `block-thread` (104 vs. 116 GFLOP/s),
+plausibly because at that size the kernel is launch/latency-bound and the
+shared-memory staging is pure overhead (not investigated further). `small` and `pointwise` beating
 or matching cuDNN in every mode (including the real vendor path) is
 consistent with `docs/shared_memory_gpu_lowering.md`'s and the earlier
 block-thread evaluation's own observation: cuDNN's dispatch/algorithm-search
@@ -213,9 +221,15 @@ alignment fix, including the exact previously-crashing
 ## What this run does and doesn't establish
 
 **Established:** the shared-memory/tensor-core kernels are a large, real
-improvement over the block-thread baseline on every tile-aligned shape
-tested, correctness-verified against pedantic-FP32/TF32 vendor references,
-with the autotuner correctly selecting near-best-of-sweep candidates.
+improvement over the block-thread baseline on the medium/large
+tile-aligned shapes (up to 4.0x for `shared-fp32` and 5.6x for `autotuned`
+on GEMM, 1.6x-3.0x on BMM, 1.6x-2.4x on the larger convs),
+correctness-verified against pedantic-FP32/TF32 vendor references, with the
+autotuner selecting the sweep's best candidate. The gain is small on the
+smallest shapes (GEMM mobilenet 1.4x) and negative on `conv_small` (-11%).
+Comparisons are against *pedantic-FP32* (no TF32 promotion) vendor
+libraries, and only the FP32 strategies are near the vendor number:
+`tensorcore-tf32` reaches only 13%-45% of cuBLAS-TF32.
 
 **Not yet established:** correctness on non-tile-aligned shapes under
 `autotuned` (known-broken, see #2b), correctness of `bmm_irregular`/
